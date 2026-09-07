@@ -268,6 +268,22 @@
       <div class="char-grid" id="charGrid"></div>
     </div>
 
+    <!-- Multiplayer is optional. It stays out of the local-game flow until a room is created or joined. -->
+    <div class="card-box" id="onlineRoomBox">
+      <h3>Chơi trực tuyến (Firebase)</h3>
+      <p class="pickmsg" id="roomStatus">Chưa kết nối phòng — bạn vẫn có thể chơi trên cùng một máy.</p>
+      <div class="count-row">
+        <input id="onlineDisplayName" maxlength="24" autocomplete="nickname" placeholder="Tên hiển thị" aria-label="Tên hiển thị">
+        <button id="createRoomBtn" type="button">Tạo phòng</button>
+        <input id="joinRoomCode" maxlength="6" autocomplete="off" placeholder="Mã phòng" aria-label="Mã phòng">
+        <button id="joinRoomBtn" type="button">Tham gia</button>
+        <button id="leaveRoomBtn" type="button" class="hidden">Rời phòng</button>
+      </div>
+      <div class="pickmsg" id="roomRoster"></div>
+      <div class="count-row hidden" id="roomActions"><button id="readyRoomBtn" type="button">Sẵn sàng</button></div>
+      <p class="pickmsg">v1.23 đồng bộ lobby và authoritative snapshot. Gameplay online đầy đủ, action gameplay và thông tin bí mật sẽ được bổ sung ở phiên bản sau.</p>
+    </div>
+
     <button class="go" id="startBtn" disabled>Vào ngôi nhà</button>
     <div class="rulebook-open"><button id="setupRulebookBtn">📖 Đọc Rulebook</button></div>
     <button class="rules-toggle" id="rulesToggle">Xem luật chơi nhanh ▾</button>
@@ -322,6 +338,10 @@
 
 <div id="modalRoot"></div>
 
+<!-- Copy firebase-config.example.js to firebase-config.js and supply your own Firebase web config. -->
+<script src="firebase-config.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 <script>
 /* =====================================================================
    DINH THỰ BLACKWOOD — engine game gốc (nhà ma + kẻ phản bội)
@@ -1172,6 +1192,179 @@ function charPortrait(id){
   return `${charArtSVG(id)}${im}`;
 }
 
+/* ---------- FIREBASE REALTIME DATABASE FOUNDATION ----------
+   The room schema is versioned and isolated from every older game record.
+   Only the host writes game snapshots; clients send actions for host review. */
+const GAME_VERSION='1.23';
+const ROOM_SCHEMA_VERSION=1;
+const STATE_SCHEMA_VERSION=1;
+const ROOM_ROOT='blackwoodManor/v1_23/rooms';
+const MAX_ROOM_PLAYERS=6;
+const Net={db:null,roomId:null,playerId:null,isHost:false,online:false,room:null,
+  roomListener:null,actionListener:null,connectionListener:null,connection:'offline',
+  stateVersion:0,lastStateFingerprint:null,processedActions:new Set()};
+
+function roomStatus(message,bad=false){
+  const el=document.getElementById('roomStatus'); if(!el) return;
+  el.textContent=message; el.style.color=bad?'#d87575':'';
+}
+function roomCode(){ return Math.random().toString(36).slice(2,8).toUpperCase(); }
+function safeDisplayName(){ return (document.getElementById('onlineDisplayName').value.trim()||'Khách').slice(0,24); }
+function persistentPlayerId(){
+  const storageKey='blackwood-manor-v1-23-player-id'; let id=localStorage.getItem(storageKey);
+  if(!id){ id='p_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,9); localStorage.setItem(storageKey,id); }
+  return id;
+}
+function firebaseReady(){
+  const config=window.BLACKWOOD_FIREBASE_CONFIG;
+  if(!config||!config.apiKey||!config.databaseURL||!window.firebase){ roomStatus('Firebase chưa được cấu hình; local mode vẫn hoạt động.',true); return false; }
+  if(!Net.db){ if(!firebase.apps.length) firebase.initializeApp(config); Net.db=firebase.database(); Net.playerId=persistentPlayerId(); }
+  return true;
+}
+function roomRef(id=Net.roomId){ return Net.db.ref(`${ROOM_ROOT}/${id}`); }
+function onlineReadOnly(){ return Net.online&&!Net.isHost; }
+function jsonData(value){ return value===undefined?null:JSON.parse(JSON.stringify(value)); }
+function serialiseCard(card){ return Object.fromEntries(Object.entries(card||{}).filter(([,value])=>typeof value!=='function')); }
+function serialisePlayer(player){
+  const copy=Object.fromEntries(Object.entries(player).filter(([keyName,value])=>keyName!=='base'&&keyName!=='inv'&&typeof value!=='function'));
+  copy.baseId=player.base?.id; copy.inv=(player.inv||[]).map(serialiseCard); return copy;
+}
+function serialiseHaunt(haunt){
+  if(!haunt) return null;
+  const runtime=Object.fromEntries(Object.entries(haunt).filter(([keyName,value])=>keyName!=='def'&&typeof value!=='function'));
+  return {...runtime,hauntId:haunt.def?.id||null};
+}
+function serializeGameState(){
+  if(!S) return null;
+  return {
+    schemaVersion:STATE_SCHEMA_VERSION,
+    players:S.players.map(serialisePlayer), turn:S.turn, phase:S.phase,
+    board:jsonData(S.board), decks:{room:jsonData(S.decks.room),item:S.decks.item.map(serialiseCard),event:S.decks.event.map(serialiseCard),omen:S.decks.omen.map(serialiseCard)},
+    omenCount:S.omenCount,lastHauntRoll:S.lastHauntRoll,pendingHauntRoll:S.pendingHauntRoll,
+    stairConns:Array.from(S.stairConns||[]),movesLeft:S.movesLeft,actedThisTurn:S.actedThisTurn,turnNo:S.turnNo,
+    monsters:jsonData(S.monsters),objectives:jsonData(S.objectives),haunt:serialiseHaunt(S.haunt),monsterPhase:jsonData(S.monsterPhase),log:jsonData(S.log)
+  };
+}
+function definitionByName(defs,name){ return defs.find(def=>def.name===name); }
+function rehydrateCards(cards,defs){ return (cards||[]).map(card=>Object.assign({},definitionByName(defs,card.name)||{},card)); }
+function rehydrateGameState(snapshot){
+  if(!snapshot||snapshot.schemaVersion!==STATE_SCHEMA_VERSION||!Array.isArray(snapshot.players)||!snapshot.board||!snapshot.decks) throw new Error('Snapshot game không hợp lệ hoặc không tương thích.');
+  const next={...snapshot}; next.players=snapshot.players.map(player=>{
+    const base=CHARACTERS.find(character=>character.id===player.baseId); if(!base) throw new Error('Snapshot chứa nhân vật không hợp lệ.');
+    const {baseId,inv,...runtime}=player; return {...runtime,base,inv:rehydrateCards(inv,ITEMS.concat(OMENS))};
+  });
+  next.decks={...snapshot.decks,item:rehydrateCards(snapshot.decks.item,ITEMS),event:rehydrateCards(snapshot.decks.event,EVENTS),omen:rehydrateCards(snapshot.decks.omen,OMENS)};
+  next.stairConns=new Set(snapshot.stairConns||[]);
+  if(snapshot.haunt?.hauntId){ const base=HAUNTS.find(haunt=>haunt.id===snapshot.haunt.hauntId); if(!base) throw new Error('Snapshot chứa Haunt không hợp lệ.'); const {hauntId,...runtime}=snapshot.haunt; next.haunt={...runtime,def:hauntNarrative({...base})}; }
+  else next.haunt=null;
+  next.viewFloor=S?.viewFloor||next.players[next.turn]?.floor||'g'; next.zoom=S?.zoom||1.4; delete next._special;
+  return next;
+}
+function renderRoomLobby(){
+  const roster=document.getElementById('roomRoster'),actions=document.getElementById('roomActions'),leave=document.getElementById('leaveRoomBtn');
+  if(!Net.room){ roster.textContent=''; actions.classList.add('hidden'); leave.classList.add('hidden'); return; }
+  const players=Object.values(Net.room.lobby?.players||{}).sort((a,b)=>(a.seatId??99)-(b.seatId??99));
+  roster.textContent=players.map(player=>`${player.displayName}${player.playerId===Net.room.meta.hostPlayerId?' (Host)':''}${player.ready?' ✓':''}${player.connected===false?' · mất kết nối':''}`).join(' · ')||'Chưa có người chơi';
+  actions.classList.remove('hidden'); leave.classList.remove('hidden');
+  document.getElementById('readyRoomBtn').textContent=(Net.room.lobby?.players?.[Net.playerId]?.ready?'Bỏ sẵn sàng':'Sẵn sàng');
+}
+function rememberRoom(id,name){ localStorage.setItem('blackwood-manor-v1-23-room-id',id); localStorage.setItem('blackwood-manor-v1-23-display-name',name); }
+function markPresence(){
+  if(!Net.online||!Net.roomId) return;
+  const ref=roomRef().child(`lobby/players/${Net.playerId}`);
+  ref.update({connected:true,lastSeen:firebase.database.ServerValue.TIMESTAMP});
+  ref.onDisconnect().update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP});
+}
+function updateConnection(connected){ Net.connection=connected?'connected':'reconnecting'; if(Net.online) roomStatus(connected?`Đã kết nối phòng ${Net.roomId}.`:'Mất kết nối — đang thử kết nối lại…',!connected); }
+function subscribeConnection(){
+  if(Net.connectionListener) Net.db.ref('.info/connected').off('value',Net.connectionListener);
+  Net.connectionListener=snapshot=>updateConnection(!!snapshot.val()); Net.db.ref('.info/connected').on('value',Net.connectionListener);
+}
+function unsubscribeRoom(){
+  if(!Net.db) return;
+  if(Net.roomListener) roomRef().off('value',Net.roomListener);
+  if(Net.actionListener) roomRef().child('actions').off('child_added',Net.actionListener);
+  Net.roomListener=null; Net.actionListener=null;
+}
+function applyAuthoritativeSnapshot(game){
+  if(!game?.publicState||game.stateVersion<=Net.stateVersion&&S) return;
+  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.lastStateFingerprint=JSON.stringify(game.publicState); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
+  catch(error){ roomStatus(`Không thể khôi phục state: ${error.message}`,true); }
+}
+function subscribeRoom(){
+  unsubscribeRoom(); subscribeConnection();
+  Net.roomListener=snapshot=>{
+    const room=snapshot.val(); if(!room) return roomStatus('Phòng không còn tồn tại.',true);
+    if(room.schemaVersion!==ROOM_SCHEMA_VERSION||room.gameVersion!==GAME_VERSION) return roomStatus('Phiên bản phòng không tương thích.',true);
+    Net.room=room; Net.isHost=room.meta?.hostPlayerId===Net.playerId; renderRoomLobby();
+    if(room.game?.publicState) applyAuthoritativeSnapshot(room.game);
+    else roomStatus(`Phòng ${Net.roomId}: ${Net.isHost?'bạn là host':'đang chờ host bắt đầu'}.`);
+    if(Net.isHost) subscribeHostActions();
+  };
+  roomRef().on('value',Net.roomListener,error=>roomStatus(`Không thể đồng bộ phòng: ${error.message}`,true));
+  markPresence();
+}
+function validLobbyAction(action,room){ return action&&action.type==='LOBBY_SET_READY'&&action.actorId&&room.lobby?.players?.[action.actorId]; }
+function subscribeHostActions(){
+  if(Net.actionListener) return;
+  Net.actionListener=snapshot=>{
+    const action=snapshot.val(); if(!action||action.status!=='pending'||Net.processedActions.has(snapshot.key)) return;
+    Net.processedActions.add(snapshot.key);
+    if(!validLobbyAction(action,Net.room)){ snapshot.ref.update({status:'rejected',reason:'invalid-action'}); return; }
+    const ready=!!action.payload?.ready;
+    roomRef().child(`lobby/players/${action.actorId}`).update({ready,lastSeen:firebase.database.ServerValue.TIMESTAMP});
+    snapshot.ref.update({status:'applied',processedAt:firebase.database.ServerValue.TIMESTAMP});
+  };
+  roomRef().child('actions').on('child_added',Net.actionListener);
+}
+function dispatchAction(type,payload={}){
+  if(!Net.online||!Net.roomId) return false;
+  return roomRef().child('actions').push({type,payload,actorId:Net.playerId,status:'pending',requestedAt:firebase.database.ServerValue.TIMESTAMP}).then(()=>true).catch(error=>{roomStatus(`Không gửi được action: ${error.message}`,true);return false;});
+}
+function publishAuthoritativeState(){
+  if(!Net.online||!Net.isHost||!S) return;
+  const state=serializeGameState(),fingerprint=JSON.stringify(state); if(fingerprint===Net.lastStateFingerprint) return;
+  Net.lastStateFingerprint=fingerprint;
+  roomRef().child('game').transaction(current=>({stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:(current?.stateVersion||0)+1,authoritativeHostId:Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP})).then(result=>{ if(result.committed){ Net.stateVersion=result.snapshot.val().stateVersion; roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP}); } }).catch(error=>roomStatus(`Host không thể ghi state: ${error.message}`,true));
+}
+function createRoomRecord(name){
+  const player={playerId:Net.playerId,displayName:name,seatId:0,ready:false,joinedAt:firebase.database.ServerValue.TIMESTAMP,lastSeen:firebase.database.ServerValue.TIMESTAMP};
+  return {schemaVersion:ROOM_SCHEMA_VERSION,gameVersion:GAME_VERSION,meta:{hostPlayerId:Net.playerId,maxPlayers:MAX_ROOM_PLAYERS,createdAt:firebase.database.ServerValue.TIMESTAMP,hostHeartbeat:firebase.database.ServerValue.TIMESTAMP},lobby:{status:'lobby',players:{[Net.playerId]:player}},game:{stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:0,authoritativeHostId:Net.playerId,publicState:null},actions:{}};
+}
+async function createOnlineRoom(){
+  if(!firebaseReady()) return; const name=safeDisplayName(); document.getElementById('createRoomBtn').disabled=true;
+  try{ for(let attempt=0;attempt<5;attempt++){ const id=roomCode(),result=await roomRef(id).transaction(current=>current===null?createRoomRecord(name):undefined); if(result.committed){ Net.roomId=id;Net.online=true;Net.isHost=true;rememberRoom(id,name);subscribeRoom();roomStatus(`Bạn là host. Mã phòng: ${id}`);return; } } roomStatus('Không tạo được mã phòng mới. Hãy thử lại.',true); }
+  catch(error){ roomStatus(`Không thể tạo phòng: ${error.message}`,true); }
+  finally{ document.getElementById('createRoomBtn').disabled=false; }
+}
+async function joinOnlineRoom(){
+  if(!firebaseReady()) return; const id=document.getElementById('joinRoomCode').value.trim().toUpperCase(),name=safeDisplayName();
+  if(!/^[A-Z0-9]{6}$/.test(id)) return roomStatus('Mã phòng gồm 6 ký tự chữ hoặc số.',true);
+  try{
+    const result=await roomRef(id).transaction(room=>{
+      if(!room||room.schemaVersion!==ROOM_SCHEMA_VERSION||room.gameVersion!==GAME_VERSION) return;
+      const players=room.lobby?.players||{}; if(!players[Net.playerId]&&(room.lobby?.status!=='lobby'||Object.keys(players).length>=room.meta.maxPlayers)) return;
+      if(!players[Net.playerId]){ const seats=new Set(Object.values(players).map(player=>player.seatId)); let seatId=0; while(seats.has(seatId)) seatId++; players[Net.playerId]={playerId:Net.playerId,displayName:name,seatId,ready:false,joinedAt:firebase.database.ServerValue.TIMESTAMP,lastSeen:firebase.database.ServerValue.TIMESTAMP}; }
+      else { players[Net.playerId].displayName=name; players[Net.playerId].lastSeen=firebase.database.ServerValue.TIMESTAMP; }
+      room.lobby={...room.lobby,players}; return room;
+    });
+    if(!result.committed){ const existing=(await roomRef(id).once('value')).val(); roomStatus(existing?'Phòng đã đủ người hoặc không tương thích.':'Không tìm thấy phòng này.',true); return; }
+    Net.roomId=id;Net.online=true;Net.isHost=false;rememberRoom(id,name);subscribeRoom();
+  }catch(error){ roomStatus(`Không thể tham gia phòng: ${error.message}`,true); }
+}
+function leaveOnlineRoom(){
+  if(!Net.online) return; roomRef().child(`lobby/players/${Net.playerId}`).update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP}); unsubscribeRoom(); Net.online=false;Net.isHost=false;Net.room=null;Net.roomId=null;Net.stateVersion=0;Net.lastStateFingerprint=null;localStorage.removeItem('blackwood-manor-v1-23-room-id'); renderRoomLobby();roomStatus('Đã rời phòng. Local mode vẫn hoạt động.');buildSetup();
+}
+function restoreOnlineRoom(){
+  const id=localStorage.getItem('blackwood-manor-v1-23-room-id'),name=localStorage.getItem('blackwood-manor-v1-23-display-name'),config=window.BLACKWOOD_FIREBASE_CONFIG;
+  if(!id||!config?.apiKey||!config?.databaseURL) return;
+  document.getElementById('joinRoomCode').value=id; document.getElementById('onlineDisplayName').value=name||'Khách'; joinOnlineRoom();
+}
+document.getElementById('createRoomBtn').onclick=createOnlineRoom;
+document.getElementById('joinRoomBtn').onclick=joinOnlineRoom;
+document.getElementById('leaveRoomBtn').onclick=leaveOnlineRoom;
+document.getElementById('readyRoomBtn').onclick=()=>{ const ready=!!Net.room?.lobby?.players?.[Net.playerId]?.ready; dispatchAction('LOBBY_SET_READY',{ready:!ready}); };
+
 /* ---------- SETUP UI ---------- */
 let setupState = {count:3, picks:{}};
 function buildSetup(){
@@ -1179,7 +1372,7 @@ function buildSetup(){
   for(let n=2;n<=6;n++){
     const b=document.createElement('button'); b.textContent=n;
     if(n===setupState.count) b.classList.add('on');
-    b.onclick=()=>{ setupState.count=n; setupState.picks={}; buildSetup(); };
+    b.onclick=()=>{ if(onlineReadOnly()) return; setupState.count=n; setupState.picks={}; buildSetup(); };
     cr.appendChild(b);
   }
   const grid=document.getElementById('charGrid'); grid.innerHTML='';
@@ -1197,9 +1390,10 @@ function buildSetup(){
   });
   const picked=Object.keys(setupState.picks).length;
   document.getElementById('pickMsg').textContent=`Đã chọn ${picked}/${setupState.count} nhân vật. Bấm lần lượt cho từng người chơi.`;
-  document.getElementById('startBtn').disabled = picked!==setupState.count;
+  document.getElementById('startBtn').disabled = picked!==setupState.count || onlineReadOnly();
 }
 function togglePick(cid){
+  if(onlineReadOnly()) return;
   const entry=Object.entries(setupState.picks).find(([k,v])=>v===cid);
   if(entry){ delete setupState.picks[entry[0]]; }
   else {
@@ -1216,6 +1410,10 @@ document.getElementById('startBtn').onclick=startGame;
 
 /* ---------- START GAME ---------- */
 function startGame(){
+  if(Net.online && !Net.isHost){
+    roomStatus('Chỉ host có thể bắt đầu ván trong phòng trực tuyến.',true);
+    return;
+  }
   const players=[];
   for(let i=0;i<setupState.count;i++){
     const base=CHARACTERS.find(c=>c.id===setupState.picks[i]);
@@ -1349,6 +1547,7 @@ function startTurn(){
 function cur(){ return S.players[S.turn]; }
 function nextTurnRaw(){ S.turn=(S.turn+1)%S.players.length; startTurn(); }
 function endTurn(){
+  if(onlineReadOnly()) return;
   if(S.phase==='explore' && S.pendingHauntRoll){
     S.pendingHauntRoll=false;
     showHauntRollPrompt(cur());
@@ -1364,6 +1563,7 @@ function endTurn(){
 
 /* ---------- MOVEMENT & EXPLORE ---------- */
 function tryMove(fl,x,y){
+  if(onlineReadOnly()) return;
   const p=cur();
   if(fl!==p.floor) return;
   const dir=dirBetween(p.x,p.y,x,y);
@@ -1421,6 +1621,7 @@ function exploreInto(fl,x,y,dir){
 
 /* ---------- FLOOR CHANGE (qua landing trung tâm) ---------- */
 function useStairs(toFloor){ // cầu thang trung tâm (sảnh) -> sảnh tầng kia
+  if(onlineReadOnly()) return;
   const p=cur();
   const t=tileAt(S,p.floor,p.x,p.y);
   if(!t || !t.landing){ return; }
@@ -1429,6 +1630,7 @@ function useStairs(toFloor){ // cầu thang trung tâm (sảnh) -> sảnh tầng
   render();
 }
 function useStairTile(){ // cầu thang phụ -> điểm ngẫu nhiên đã khám phá, hai chiều
+  if(onlineReadOnly()) return;
   const p=cur();
   const t=tileAt(S,p.floor,p.x,p.y);
   if(!t) return;
@@ -1792,6 +1994,7 @@ function monsterAttack(m,h){
 
 /* Người chơi tấn công mục tiêu kề (quái hoặc người khác) */
 function attack(targetType,target){
+  if(onlineReadOnly()) return;
   const p=cur(); if(!target)return;
   const pdice=rollStatDice(eff(p,'str')+(p.mods.combat||0)); const pr=pdice.reduce((a,b)=>a+b,0);
   if(targetType==='monster'){
@@ -1909,6 +2112,7 @@ function render(){
   renderGrid();
   renderSide();
   renderLog();
+  publishAuthoritativeState();
 }
 function setZoom(d){
   if(!S) return;
@@ -1937,7 +2141,7 @@ function renderGrid(){
         const here = p.floor===fl && p.x===x && p.y===y;
         if(here) cell.classList.add('here');
         const dir = p.floor===fl ? dirBetween(p.x,p.y,x,y) : null;
-        const canMove = dir && S.movesLeft>0 && !p.down && !isModalOpen() && connectedTiles(S,fl,p.x,p.y,dir);
+        const canMove = dir && S.movesLeft>0 && !p.down && !isModalOpen() && !onlineReadOnly() && connectedTiles(S,fl,p.x,p.y,dir);
         if(canMove) cell.classList.add('movetarget');
         let sym=''; if(t.sym) sym=`<div class="sym ${t.sym}">${t.sym==='event'?'✦':'☠'}</div>`; if(t.itemSpecial&&!t.itemTaken) sym+=`<div class="sym item" title="Phòng đặc biệt: có thể lục soát để lấy Item">◆</div>`;
         let toks='';
@@ -1961,7 +2165,7 @@ function renderGrid(){
       } else {
         const dir = p.floor===fl ? dirBetween(p.x,p.y,x,y) : null;
         const pTile = p.floor===fl ? tileAt(S,fl,p.x,p.y) : null;
-        const reach = dir && pTile && pTile.doors && pTile.doors[dir] && S.movesLeft>0 && !p.down && !isModalOpen();
+        const reach = dir && pTile && pTile.doors && pTile.doors[dir] && S.movesLeft>0 && !p.down && !isModalOpen() && !onlineReadOnly();
         cell.className = reach?'cell reach':'cell empty';
         if(reach) cell.onclick=()=>tryMove(fl,x,y);
       }
@@ -2007,7 +2211,7 @@ function renderSide(){
   // Hành động
   html+='<div class="sec-title">Hành động</div><div class="actions">';
   const t=tileAt(S,p.floor,p.x,p.y);
-  const busy=p.down||isModalOpen();
+  const busy=p.down||isModalOpen()||onlineReadOnly();
 
   // cầu thang
   const ADJ={g:['u','b'], u:['g'], b:['g']};
@@ -2136,7 +2340,7 @@ function renderSide(){
     };
   });
 
-  document.getElementById('endTurnBtn').disabled = isModalOpen() || !!S.monsterPhase;
+  document.getElementById('endTurnBtn').disabled = isModalOpen() || !!S.monsterPhase || onlineReadOnly();
   document.getElementById('rollBtn').disabled = isModalOpen();
 }
 function ha006(d,p){ // hiển thị tiến độ mục tiêu
@@ -2291,6 +2495,7 @@ function closeModal(){ modalOpen=false; document.getElementById('modalRoot').inn
 
 /* ---------- INIT ---------- */
 buildSetup();
+restoreOnlineRoom();
 </script>
 </body>
 </html>

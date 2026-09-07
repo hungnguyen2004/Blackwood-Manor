@@ -1,0 +1,24 @@
+Dinh Thự Blackwood v1.23 — Multiplayer Foundation
+
+ADDED
+- Optional Firebase Realtime Database room creation and joining.
+- Persistent anonymous player identity, seats, display names, lobby roster,
+  host indicator, ready intent and connection status.
+- Versioned room/state schema and a host-authoritative public state snapshot.
+- Explicit game-state serialization and rehydration for Set, card behaviors,
+  character definitions and Haunt definitions.
+- Reconnect to the last room in the same browser and offline presence marking.
+- Multiplayer architecture documentation and safe Firebase config template.
+
+CHANGED
+- Online non-host clients are read-only during the existing game loop.
+- Local single-player mode remains independent of Firebase.
+
+FIXED
+- Shared game state is no longer written by every client render.
+
+NOT IMPLEMENTED / LIMITATIONS
+- Full online hero, traitor, monster, exploration, combat and RNG intents.
+- Private role/book/objective filtering.
+- Firebase Authentication, production Security Rules and anti-cheat measures.
+- Host migration after host loss.
