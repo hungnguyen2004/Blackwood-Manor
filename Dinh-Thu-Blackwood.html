@@ -1342,14 +1342,20 @@ async function joinOnlineRoom(){
   if(!firebaseReady()) return; const id=document.getElementById('joinRoomCode').value.trim().toUpperCase(),name=safeDisplayName();
   if(!/^[A-Z0-9]{6}$/.test(id)) return roomStatus('Mã phòng gồm 6 ký tự chữ hoặc số.',true);
   try{
-    const result=await roomRef(id).transaction(room=>{
-      if(!room||room.schemaVersion!==ROOM_SCHEMA_VERSION||room.gameVersion!==GAME_VERSION) return;
-      const players=room.lobby?.players||{}; if(!players[Net.playerId]&&(room.lobby?.status!=='lobby'||Object.keys(players).length>=room.meta.maxPlayers)) return;
-      if(!players[Net.playerId]){ const seats=new Set(Object.values(players).map(player=>player.seatId)); let seatId=0; while(seats.has(seatId)) seatId++; players[Net.playerId]={playerId:Net.playerId,displayName:name,seatId,ready:false,joinedAt:firebase.database.ServerValue.TIMESTAMP,lastSeen:firebase.database.ServerValue.TIMESTAMP}; }
-      else { players[Net.playerId].displayName=name; players[Net.playerId].lastSeen=firebase.database.ServerValue.TIMESTAMP; }
-      room.lobby={...room.lobby,players}; return room;
+    const room=(await roomRef(id).once('value')).val();
+    if(!room) return roomStatus('Không tìm thấy phòng này.',true);
+    if(room.schemaVersion!==ROOM_SCHEMA_VERSION||room.gameVersion!==GAME_VERSION) return roomStatus('Phiên bản phòng không tương thích.',true);
+    if(room.lobby?.status!=='lobby'&&!room.lobby?.players?.[Net.playerId]) return roomStatus('Ván đã bắt đầu; không thể vào phòng mới.',true);
+    const maxPlayers=room.meta?.maxPlayers||MAX_ROOM_PLAYERS;
+    const playersRef=roomRef(id).child('lobby/players');
+    const result=await playersRef.transaction(players=>{
+      const next=players||{};
+      if(next[Net.playerId]) return {...next,[Net.playerId]:{...next[Net.playerId],displayName:name,lastSeen:firebase.database.ServerValue.TIMESTAMP}};
+      if(Object.keys(next).length>=maxPlayers) return;
+      const seats=new Set(Object.values(next).map(player=>player.seatId)); let seatId=0; while(seats.has(seatId)) seatId++;
+      return {...next,[Net.playerId]:{playerId:Net.playerId,displayName:name,seatId,ready:false,joinedAt:firebase.database.ServerValue.TIMESTAMP,lastSeen:firebase.database.ServerValue.TIMESTAMP}};
     });
-    if(!result.committed){ const existing=(await roomRef(id).once('value')).val(); roomStatus(existing?'Phòng đã đủ người hoặc không tương thích.':'Không tìm thấy phòng này.',true); return; }
+    if(!result.committed) return roomStatus('Phòng đã đủ người.',true);
     Net.roomId=id;Net.online=true;Net.isHost=false;rememberRoom(id,name);subscribeRoom();
   }catch(error){ roomStatus(`Không thể tham gia phòng: ${error.message}`,true); }
 }
