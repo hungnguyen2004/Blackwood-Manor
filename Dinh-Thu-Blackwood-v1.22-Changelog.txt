@@ -1,0 +1,14 @@
+DINH THỰ BLACKWOOD — v1.22 CHANGELOG
+
+Mục tiêu: tích hợp Rulebook vào giao diện game mà không thay đổi luật gameplay hiện có.
+
+THAY ĐỔI
+- Thêm Rulebook trong game, mở được từ màn hình chuẩn bị và trong khi chơi.
+- Rulebook trình bày luật hệ thống: chuẩn bị, nhân vật/chỉ số, cấu trúc lượt, khám phá, tương tác, Combat, Monster Phase, STUN/KILL, Range/LOS, vật phẩm, Haunt, vai trò phe và luật ưu tiên.
+- Rulebook không spoil danh sách, tên, chỉ số hoặc khả năng cụ thể của quái vật/Boss.
+- Thêm nhãn phiên bản v1.22 cho bản game mới.
+- Không thay đổi dữ liệu Haunt, quái vật, bản đồ, nhân vật hoặc cơ chế gameplay hiện có trong v1.21.
+
+QUY TẮC TÀI LIỆU
+- Nếu một bản sau thay đổi cơ chế gameplay, Rulebook phải được cập nhật trong cùng phiên bản.
+- Không ghi đè các phiên bản cũ.
