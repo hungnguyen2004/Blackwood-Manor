@@ -2101,7 +2101,7 @@ function setBackdrop(){
 const MON_IMG_MISS = Object.create(null);
 function monImg(name){
   const sg=slug(name||'monster');
-  return `<img class="monphoto" src="img/mon-${sg}.jpg" data-mon-slug="${sg}" onload="this.classList.add('ok')" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex';MON_IMG_MISS['${String(name||'').replace(/'/g,"\\'")}']=true" alt="">`+`<span class="monfallback">☠</span>`;
+  return `<img class="monphoto" src="mon-icons/mon-${sg}.jpg" data-mon-slug="${sg}" onload="this.classList.add('ok')" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex';MON_IMG_MISS['${String(name||'').replace(/'/g,"\\'")}']=true" alt="">`+`<span class="monfallback">☠</span>`;
 }
 function render(){
   if(!S) return;
