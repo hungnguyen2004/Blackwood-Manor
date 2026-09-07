@@ -116,12 +116,13 @@
   .cell .tokens{position:absolute; bottom:4px; left:5px; right:5px; display:flex; gap:3px; flex-wrap:wrap; z-index:3;}
   .tok{width:20px; height:20px; border-radius:50%; font-size:11px; display:flex; align-items:center; justify-content:center; font-weight:700; border:1px solid rgba(0,0,0,.65); box-shadow:0 1px 3px rgba(0,0,0,.75), inset 0 1px 2px rgba(255,255,255,.28); position:relative;}
   .tok .tr{position:absolute; right:-2px; top:-3px; color:#ff5a4a; font-size:10px; text-shadow:0 0 3px #000,0 1px 1px #000; z-index:2;}
-  .tok.pl{width:24px; height:24px; padding:0; overflow:hidden; background:#171020; border:2px solid var(--pc,#e3a54c); box-shadow:0 0 6px rgba(0,0,0,.6), 0 1px 3px rgba(0,0,0,.85);}
+  .tok.pl{width:calc(32px * var(--zoom,1)); height:calc(32px * var(--zoom,1)); padding:0; overflow:hidden; background:#171020; border:2px solid var(--pc,#e3a54c); box-shadow:0 0 6px rgba(0,0,0,.6), 0 1px 3px rgba(0,0,0,.85);}
   .tok.pl .pfig{width:100%; height:100%; display:block;}
   .tok.mon .monphoto{display:none;width:100%;height:100%;object-fit:cover;border-radius:50%;position:absolute;inset:0;}
 .tok.mon .monphoto.ok{display:block;}
 .tok.mon .monfallback{display:inline-flex;width:100%;height:100%;align-items:center;justify-content:center;}
-.tok.mon{background:radial-gradient(circle at 38% 30%, #e0473f, #6d1414); color:#fff; border-color:#2a0808; box-shadow:0 0 7px rgba(180,36,32,.65), 0 1px 3px rgba(0,0,0,.75);}
+.tok.mon{width:calc(27px * var(--zoom,1)); height:calc(27px * var(--zoom,1)); font-size:calc(15px * var(--zoom,1)); background:radial-gradient(circle at 38% 30%, #e0473f, #6d1414); color:#fff; border-color:#2a0808; box-shadow:0 0 7px rgba(180,36,32,.65), 0 1px 3px rgba(0,0,0,.75);}
+.tok.mon.elite{width:calc(36px * var(--zoom,1)); height:calc(36px * var(--zoom,1)); font-size:calc(20px * var(--zoom,1));}
   .tok.mon.stunned{opacity:.52; filter:grayscale(.8); transform:scale(.94);}
   .tok.obj{background:radial-gradient(circle at 38% 30%, #ffe6a8, #e3a54c); color:#3a2410; box-shadow:0 0 9px rgba(227,165,76,.85), 0 1px 3px rgba(0,0,0,.7);}
   .cell .stairs{position:absolute; bottom:3px; right:5px; font-size:11px; color:var(--amber); z-index:3; text-shadow:0 1px 2px #000;}
@@ -2146,7 +2147,7 @@ function renderGrid(){
         let sym=''; if(t.sym) sym=`<div class="sym ${t.sym}">${t.sym==='event'?'✦':'☠'}</div>`; if(t.itemSpecial&&!t.itemTaken) sym+=`<div class="sym item" title="Phòng đặc biệt: có thể lục soát để lấy Item">◆</div>`;
         let toks='';
         S.players.forEach(q=>{ if(q.floor===fl&&q.x===x&&q.y===y){ toks+=`<div class="tok pl" style="--pc:${q.color}" title="${q.name}">${charPortrait(q.base.id)}${q.traitor?'<span class="tr">✗</span>':''}</div>`; } });
-        S.monsters.forEach(m=>{ if(m.floor===fl&&m.x===x&&m.y===y){ toks+=`<div class="tok mon${m.stunned>0?' stunned':''}" title="${m.name} (${m.hp}❤) · ${monsterAttackLabel(m)} ${monsterAttackValue(m)}${monsterAttackRange(m)>1?' · Tầm '+monsterAttackRange(m):''}${monsterNeedsLineOfSight(m)?' · LOS':''}${m.stunned>0?' · STUNNED':''}">${monImg(m.name)}</div>`; } });
+        S.monsters.forEach(m=>{ if(m.floor===fl&&m.x===x&&m.y===y){ toks+=`<div class="tok mon${m.hpMax>=5?' elite':''}${m.stunned>0?' stunned':''}" title="${m.name} (${m.hp}❤) · ${monsterAttackLabel(m)} ${monsterAttackValue(m)}${monsterAttackRange(m)>1?' · Tầm '+monsterAttackRange(m):''}${monsterNeedsLineOfSight(m)?' · LOS':''}${m.stunned>0?' · STUNNED':''}">${monImg(m.name)}</div>`; } });
         S.objectives.forEach(o=>{ if(o.floor===fl&&o.x===x&&o.y===y){ toks+=`<div class="tok obj" title="${o.name}">◈</div>`; } });
         const stairLabel = t.landing ? 'thang' : (t.stairTo==='b'?'↓ hầm':t.stairTo==='u'?'↑ gác':'↕ trệt');
         const st = (t.landing||t.stairTo)?`<div class="stairs">⇅ ${stairLabel}</div>`:'';
