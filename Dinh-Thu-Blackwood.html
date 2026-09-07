@@ -1252,10 +1252,21 @@ function rehydrateGameState(snapshot){
   if(!snapshot||snapshot.schemaVersion!==STATE_SCHEMA_VERSION||!Array.isArray(snapshot.players)||!snapshot.board||!snapshot.decks) throw new Error('Snapshot game không hợp lệ hoặc không tương thích.');
   const next={...snapshot}; next.players=snapshot.players.map(player=>{
     const base=CHARACTERS.find(character=>character.id===player.baseId); if(!base) throw new Error('Snapshot chứa nhân vật không hợp lệ.');
-    const {baseId,inv,...runtime}=player; return {...runtime,base,inv:rehydrateCards(inv,ITEMS.concat(OMENS))};
+    const {baseId,inv,...runtime}=player;
+    return {mods:{str:0,agi:0,spi:0,int:0,combat:0},wards:[],rollBonus:{},hpWards:0,...runtime,base,inv:rehydrateCards(inv,ITEMS.concat(OMENS))};
   });
-  next.decks={...snapshot.decks,item:rehydrateCards(snapshot.decks.item,ITEMS),event:rehydrateCards(snapshot.decks.event,EVENTS),omen:rehydrateCards(snapshot.decks.omen,OMENS)};
-  next.stairConns=new Set(snapshot.stairConns||[]);
+  next.board={u:snapshot.board.u||{},g:snapshot.board.g||{},b:snapshot.board.b||{}};
+  next.decks={room:Array.isArray(snapshot.decks.room)?snapshot.decks.room:[],item:rehydrateCards(snapshot.decks.item,ITEMS),event:rehydrateCards(snapshot.decks.event,EVENTS),omen:rehydrateCards(snapshot.decks.omen,OMENS)};
+  next.stairConns=new Set(Array.isArray(snapshot.stairConns)?snapshot.stairConns:[]);
+  // Realtime Database omits empty arrays. Restore the runtime shapes before render
+  // so a guest can display a perfectly valid early-game snapshot.
+  next.monsters=Array.isArray(snapshot.monsters)?snapshot.monsters:[];
+  next.objectives=Array.isArray(snapshot.objectives)?snapshot.objectives:[];
+  next.log=Array.isArray(snapshot.log)?snapshot.log:[];
+  next.turn=Number.isInteger(snapshot.turn)?snapshot.turn:0;
+  next.movesLeft=Number.isFinite(snapshot.movesLeft)?snapshot.movesLeft:0;
+  next.actedThisTurn=!!snapshot.actedThisTurn;
+  next.turnNo=Number.isInteger(snapshot.turnNo)?snapshot.turnNo:1;
   if(snapshot.haunt?.hauntId){ const base=HAUNTS.find(haunt=>haunt.id===snapshot.haunt.hauntId); if(!base) throw new Error('Snapshot chứa Haunt không hợp lệ.'); const {hauntId,...runtime}=snapshot.haunt; next.haunt={...runtime,def:hauntNarrative({...base})}; }
   else next.haunt=null;
   next.viewFloor=S?.viewFloor||next.players[next.turn]?.floor||'g'; next.zoom=S?.zoom||1.4; delete next._special;
