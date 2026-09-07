@@ -1,0 +1,26 @@
+DINH THỰ BLACKWOOD — CHANGELOG v1.21
+=====================================
+
+Base: v1.20
+Previous version preserved unchanged:
+  v1.20 SHA256: 6e6de163c0c11fb85d1d739208821f90b6b7f528fcb99f365b5f4f355d9a4ba4
+
+v1.21 — Regression fix
+----------------------
+1. Khôi phục icon/ảnh quái vật trên token:
+   - Token quái gọi lại monImg(name) và dùng asset theo mẫu img/mon-<slug>.jpg.
+   - Nếu ảnh không tồn tại/lỗi tải, token tự fallback về biểu tượng ☠, tránh làm mất token.
+   - Giữ nguyên nhãn combat, tầm đánh, LOS và trạng thái STUNNED.
+
+2. Cập nhật nhãn phiên bản giao diện:
+   - BLACKWOOD v1.17 -> BLACKWOOD v1.21.
+
+3. Không thay đổi logic Pha Quái, điều khiển quái, AI Zombie/Chuột Cống,
+   kiểu tấn công, Line of Sight hoặc STUN/KILL/SPECIAL của v1.20.
+
+Kiểm tra:
+- JavaScript syntax: PASS (extract toàn bộ <script> và chạy node --check).
+- v1.20 không bị ghi đè.
+
+SHA256 v1.21:
+  6a2d4b7843d6bae75f915735fdbcdfcd6c9b4d807dec44bf55d3c4af9d5f861f
