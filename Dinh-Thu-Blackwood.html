@@ -1210,7 +1210,7 @@ const ROOM_ROOT='blackwoodManor/v1_23/rooms';
 const MAX_ROOM_PLAYERS=6;
 const Net={db:null,roomId:null,playerId:null,isHost:false,online:false,room:null,
   roomListener:null,actionListener:null,connectionListener:null,statePollTimer:null,statePollBusy:false,writeTimer:null,reconnectTimer:null,transport:'unknown',connection:'offline',
-  stateVersion:0,lastStateFingerprint:null,authoritativeFingerprint:null,processedActions:new Set()};
+  stateVersion:0,lastStateFingerprint:null,authoritativeFingerprint:null,processedActions:new Set(),mode:'rest'};
 
 function roomStatus(message,bad=false){
   const setupStatus=document.getElementById('roomStatus'),playStatus=document.getElementById('playSyncStatus');
@@ -1230,7 +1230,10 @@ function persistentPlayerId(){
 }
 function firebaseReady(){
   const config=window.BLACKWOOD_FIREBASE_CONFIG;
-  if(!config||!config.apiKey||!config.databaseURL||!window.firebase){ roomStatus('Firebase chưa được cấu hình; local mode vẫn hoạt động.',true); return false; }
+  if(!config||!config.databaseURL){ roomStatus('Firebase chưa được cấu hình; local mode vẫn hoạt động.',true); return false; }
+  Net.playerId=Net.playerId||persistentPlayerId();
+  // REST is authoritative so an SDK offline cache cannot create a phantom room.
+  if(!window.firebase){ Net.transport='HTTPS REST polling'; return true; }
   if(!Net.db){
     if(!firebase.apps.length) firebase.initializeApp(config);
     // Prefer RTDB long polling: WebSocket can connect initially but then leave
@@ -1239,11 +1242,29 @@ function firebaseReady(){
     const forceLongPolling=Net.db.INTERNAL?.forceLongPolling;
     if(typeof forceLongPolling==='function'){ Net.db.INTERNAL.forceLongPolling(); Net.transport='long-polling requested'; }
     else Net.transport='default transport (long-poll API unavailable)';
-    Net.db.goOnline(); Net.playerId=persistentPlayerId();
+    Net.db.goOnline();
   }
   return true;
 }
 function roomRef(id=Net.roomId){ return Net.db.ref(`${ROOM_ROOT}/${id}`); }
+function restUrl(path){
+  const base=String(window.BLACKWOOD_FIREBASE_CONFIG?.databaseURL||'').replace(/\/$/,'');
+  if(!base) throw new Error('Missing Firebase databaseURL');
+  return `${base}/${path.split('/').map(encodeURIComponent).join('/')}.json`;
+}
+function restRoomPath(id=Net.roomId){ return `${ROOM_ROOT}/${id}`; }
+async function restRequest(path,{method='GET',body}={}){
+  const response=await fetch(restUrl(path),{method,cache:'no-store',headers:body===undefined?undefined:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  if(!response.ok) throw new Error(`REST ${method} HTTP ${response.status}`);
+  return response.json();
+}
+async function readRestRoom(id=Net.roomId){ return restRequest(restRoomPath(id)); }
+async function writeRestRoom(id,room){ return restRequest(restRoomPath(id),{method:'PUT',body:room}); }
+async function patchRestRoom(path,changes){ return restRequest(`${restRoomPath()}/${path}`,{method:'PATCH',body:changes}); }
+async function readRestGame(){ return restRequest(`${restRoomPath()}/game`); }
+async function writeRestGame(game){
+  return patchRestRoom('game',game);
+}
 function controlsCurrentTurn(){
   if(!Net.online||!S) return true;
   const owner=cur()?.ownerPlayerId;
@@ -1310,22 +1331,25 @@ function renderRoomLobby(){
 function rememberRoom(id,name){ localStorage.setItem('blackwood-manor-v1-23-room-id',id); localStorage.setItem('blackwood-manor-v1-23-display-name',name); }
 function markPresence(){
   if(!Net.online||!Net.roomId) return;
-  const ref=roomRef().child(`lobby/players/${Net.playerId}`);
-  ref.update({connected:true,lastSeen:firebase.database.ServerValue.TIMESTAMP});
-  ref.onDisconnect().update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP});
+  patchRestRoom(`lobby/players/${Net.playerId}`,{connected:true,lastSeen:Date.now()})
+    .catch(error=>roomStatus(`Không thể cập nhật hiện diện: ${error.message}`,true));
 }
 function updateConnection(connected){
   Net.connection=connected?'connected':'reconnecting';
   if(Net.roomId) connectionStatus(`RTDB ${Net.transport} · ${connected?'đã kết nối':'đang kết nối lại…'}`,!connected);
 }
 function subscribeConnection(){
+  if(Net.mode==='rest'){
+    Net.connection='connected';
+    connectionStatus('Firebase HTTPS REST polling · đã kết nối');
+    return;
+  }
   if(Net.connectionListener) Net.db.ref('.info/connected').off('value',Net.connectionListener);
   Net.connectionListener=snapshot=>updateConnection(!!snapshot.val()); Net.db.ref('.info/connected').on('value',Net.connectionListener);
 }
 function unsubscribeRoom(){
-  if(!Net.db) return;
-  if(Net.roomListener) roomRef().off('value',Net.roomListener);
-  if(Net.actionListener) roomRef().child('actions').off('child_added',Net.actionListener);
+  if(Net.db&&Net.roomListener) roomRef().off('value',Net.roomListener);
+  if(Net.db&&Net.actionListener) roomRef().child('actions').off('child_added',Net.actionListener);
   if(Net.statePollTimer) clearInterval(Net.statePollTimer);
   Net.statePollTimer=null; Net.statePollBusy=false;
   Net.roomListener=null; Net.actionListener=null;
@@ -1341,24 +1365,22 @@ function applyAuthoritativeSnapshot(game){
 }
 function subscribeRoom(){
   unsubscribeRoom(); subscribeConnection();
-  Net.roomListener=snapshot=>{
-    const room=snapshot.val(); if(!room) return roomStatus('Phòng không còn tồn tại.',true);
+  const receiveRoom=room=>{
+    if(!room) return roomStatus('Phòng không còn tồn tại trên Firebase.',true);
     if(room.schemaVersion!==ROOM_SCHEMA_VERSION||room.gameVersion!==GAME_VERSION) return roomStatus('Phiên bản phòng không tương thích.',true);
     Net.room=room; Net.isHost=room.meta?.hostPlayerId===Net.playerId; renderRoomLobby();
     if(room.game?.publicState){ applyAuthoritativeSnapshot(room.game); roomStatus(`Firebase ${Net.roomId} · state v${room.game.stateVersion||0}`); }
     else { buildSetup(); roomStatus(`Phòng ${Net.roomId}: ${Net.isHost?'bạn là host':'đang chờ host bắt đầu'}.`); }
-    if(Net.isHost) subscribeHostActions();
   };
-  roomRef().on('value',Net.roomListener,error=>roomStatus(`Không thể đồng bộ phòng: ${error.message}`,true));
-  // Some file:// browser contexts establish the initial RTDB read but fail to
-  // deliver later streaming events. Polling the small game node is a fallback.
-  Net.statePollTimer=setInterval(async()=>{
-    if(!Net.db||!Net.roomId||Net.statePollBusy) return;
+  const poll=async()=>{
+    if(!Net.roomId||Net.statePollBusy) return;
     Net.statePollBusy=true;
-    try{ applyAuthoritativeSnapshot((await roomRef().child('game').once('value')).val()); }
-    catch(error){ roomStatus(`Không thể làm mới state: ${error.message}`,true); }
+    try{ receiveRoom(await readRestRoom()); }
+    catch(error){ roomStatus(`Không thể làm mới phòng từ Firebase: ${error.message}`,true); }
     finally{ Net.statePollBusy=false; }
-  },1000);
+  };
+  poll();
+  Net.statePollTimer=setInterval(poll,1000);
   markPresence();
 }
 function validLobbyAction(action,room){ return action&&action.type==='LOBBY_SET_READY'&&action.actorId&&room.lobby?.players?.[action.actorId]; }
@@ -1399,7 +1421,7 @@ function dispatchAction(type,payload={}){
 function publishAuthoritativeState(){
   // A browser reconnect can briefly desynchronise the UI flag; the database
   // handle and room id are the durable proof that this is an online game.
-  if(!Net.db||!Net.roomId||!S) return;
+  if(!Net.roomId||!S) return;
   const state=serializeGameState(),fingerprint=JSON.stringify(state); if(fingerprint===Net.lastStateFingerprint) return;
   Net.lastStateFingerprint=fingerprint;
   const nextVersion=Math.max(Net.stateVersion||0,Net.room?.game?.stateVersion||0)+1;
@@ -1408,26 +1430,23 @@ function publishAuthoritativeState(){
   Net.writeTimer=setTimeout(()=>{
     Net.lastStateFingerprint=null;
     roomStatus(`Firebase ${Net.roomId} · ghi state chưa có ACK, đang ép RTDB kết nối lại…`,true);
-    Net.db.goOffline();
-    clearTimeout(Net.reconnectTimer);
-    Net.reconnectTimer=setTimeout(()=>{ Net.db.goOnline(); connectionStatus(`RTDB ${Net.transport} · đã yêu cầu kết nối lại`,true); },150);
+    connectionStatus('Firebase HTTPS REST polling · đang thử lại ghi state',true);
   },5000);
-  // Each UI action belongs to one turn owner. A direct update avoids a Web SDK
-  // transaction that can remain pending indefinitely in this static prototype.
-  roomRef().child('game').update({stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:nextVersion,authoritativeHostId:Net.room?.game?.authoritativeHostId||Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP}).then(()=>{
+  // Use REST PATCH for gameplay state: it avoids an SDK connection that can
+  // stay half-open and leave writes pending without an ACK.
+  writeRestGame({stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:nextVersion,authoritativeHostId:Net.room?.game?.authoritativeHostId||Net.playerId,publicState:state,updatedAt:Date.now()}).then(()=>{
     clearTimeout(Net.writeTimer); clearTimeout(Net.reconnectTimer); Net.writeTimer=null; Net.reconnectTimer=null;
     Net.stateVersion=nextVersion;
-    roomStatus(`Firebase ${Net.roomId} · đã ghi state v${Net.stateVersion}`);
-    roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP});
+    roomStatus(`Firebase REST ${Net.roomId} · đã ghi state v${Net.stateVersion}`);
   }).catch(error=>{ clearTimeout(Net.writeTimer); clearTimeout(Net.reconnectTimer); Net.writeTimer=null; Net.reconnectTimer=null; Net.lastStateFingerprint=null; roomStatus(`Không thể ghi state: ${error.message}`,true); });
 }
 function createRoomRecord(name){
-  const player={playerId:Net.playerId,displayName:name,seatId:0,ready:false,joinedAt:firebase.database.ServerValue.TIMESTAMP,lastSeen:firebase.database.ServerValue.TIMESTAMP};
-  return {schemaVersion:ROOM_SCHEMA_VERSION,gameVersion:GAME_VERSION,meta:{hostPlayerId:Net.playerId,maxPlayers:MAX_ROOM_PLAYERS,createdAt:firebase.database.ServerValue.TIMESTAMP,hostHeartbeat:firebase.database.ServerValue.TIMESTAMP},lobby:{status:'lobby',players:{[Net.playerId]:player}},game:{stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:0,authoritativeHostId:Net.playerId,publicState:null},actions:{}};
+  const now=Date.now(),player={playerId:Net.playerId,displayName:name,seatId:0,ready:false,connected:true,joinedAt:now,lastSeen:now};
+  return {schemaVersion:ROOM_SCHEMA_VERSION,gameVersion:GAME_VERSION,meta:{hostPlayerId:Net.playerId,maxPlayers:MAX_ROOM_PLAYERS,createdAt:now,hostHeartbeat:now},lobby:{status:'lobby',players:{[Net.playerId]:player}},game:{stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:0,authoritativeHostId:Net.playerId,publicState:null},actions:{}};
 }
 async function createOnlineRoom(){
   if(!firebaseReady()) return; const name=safeDisplayName(); document.getElementById('createRoomBtn').disabled=true;
-  try{ for(let attempt=0;attempt<5;attempt++){ const id=roomCode(),result=await roomRef(id).transaction(current=>current===null?createRoomRecord(name):undefined); if(result.committed){ Net.roomId=id;Net.online=true;Net.isHost=true;rememberRoom(id,name);subscribeRoom();roomStatus(`Bạn là host. Mã phòng: ${id}`);return; } } roomStatus('Không tạo được mã phòng mới. Hãy thử lại.',true); }
+  try{ for(let attempt=0;attempt<5;attempt++){ const id=roomCode(); if(await readRestRoom(id)!==null) continue; await writeRestRoom(id,createRoomRecord(name)); const confirmed=await readRestRoom(id); if(confirmed?.meta?.hostPlayerId!==Net.playerId) continue; Net.roomId=id;Net.online=true;Net.isHost=true;Net.room=confirmed;rememberRoom(id,name);subscribeRoom();roomStatus(`Bạn là host. Mã phòng: ${id}`);return; } roomStatus('Không tạo được mã phòng mới. Hãy thử lại.',true); }
   catch(error){ roomStatus(`Không thể tạo phòng: ${error.message}`,true); }
   finally{ document.getElementById('createRoomBtn').disabled=false; }
 }
@@ -1435,25 +1454,23 @@ async function joinOnlineRoom(){
   if(!firebaseReady()) return; const id=document.getElementById('joinRoomCode').value.trim().toUpperCase(),name=safeDisplayName();
   if(!/^[A-Z0-9]{6}$/.test(id)) return roomStatus('Mã phòng gồm 6 ký tự chữ hoặc số.',true);
   try{
-    const room=(await roomRef(id).once('value')).val();
+    const room=await readRestRoom(id);
     if(!room) return roomStatus('Không tìm thấy phòng này.',true);
     if(room.schemaVersion!==ROOM_SCHEMA_VERSION||room.gameVersion!==GAME_VERSION) return roomStatus('Phiên bản phòng không tương thích.',true);
     if(room.lobby?.status!=='lobby'&&!room.lobby?.players?.[Net.playerId]) return roomStatus('Ván đã bắt đầu; không thể vào phòng mới.',true);
     const maxPlayers=room.meta?.maxPlayers||MAX_ROOM_PLAYERS;
-    const playersRef=roomRef(id).child('lobby/players');
-    const result=await playersRef.transaction(players=>{
-      const next=players||{};
-      if(next[Net.playerId]) return {...next,[Net.playerId]:{...next[Net.playerId],displayName:name,lastSeen:firebase.database.ServerValue.TIMESTAMP}};
-      if(Object.keys(next).length>=maxPlayers) return;
-      const seats=new Set(Object.values(next).map(player=>player.seatId)); let seatId=0; while(seats.has(seatId)) seatId++;
-      return {...next,[Net.playerId]:{playerId:Net.playerId,displayName:name,seatId,ready:false,joinedAt:firebase.database.ServerValue.TIMESTAMP,lastSeen:firebase.database.ServerValue.TIMESTAMP}};
-    });
-    if(!result.committed) return roomStatus('Phòng đã đủ người.',true);
-    Net.roomId=id;Net.online=true;Net.isHost=false;rememberRoom(id,name);subscribeRoom();
+    const players=room.lobby?.players||{},existing=players[Net.playerId];
+    if(!existing&&Object.keys(players).length>=maxPlayers) return roomStatus('Phòng đã đủ người.',true);
+    const seats=new Set(Object.values(players).map(player=>player.seatId)); let seatId=0; while(seats.has(seatId)) seatId++;
+    const now=Date.now(),player=existing?{...existing,displayName:name,connected:true,lastSeen:now}:{playerId:Net.playerId,displayName:name,seatId,ready:false,connected:true,joinedAt:now,lastSeen:now};
+    await restRequest(`${restRoomPath(id)}/lobby/players/${Net.playerId}`,{method:'PUT',body:player});
+    const confirmed=await readRestRoom(id);
+    if(!confirmed?.lobby?.players?.[Net.playerId]) throw new Error('Firebase chưa xác nhận người chơi');
+    Net.roomId=id;Net.online=true;Net.isHost=confirmed.meta?.hostPlayerId===Net.playerId;Net.room=confirmed;rememberRoom(id,name);subscribeRoom();
   }catch(error){ roomStatus(`Không thể tham gia phòng: ${error.message}`,true); }
 }
 function leaveOnlineRoom(){
-  if(Net.online) roomRef().child(`lobby/players/${Net.playerId}`).update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP});
+  if(Net.online&&Net.roomId) patchRestRoom(`lobby/players/${Net.playerId}`,{connected:false,lastSeen:Date.now()}).catch(()=>{});
   clearTimeout(Net.writeTimer); clearTimeout(Net.reconnectTimer); Net.writeTimer=null; Net.reconnectTimer=null;
   unsubscribeRoom(); Net.online=false;Net.isHost=false;Net.room=null;Net.roomId=null;Net.stateVersion=0;Net.lastStateFingerprint=null;Net.authoritativeFingerprint=null;
   localStorage.removeItem('blackwood-manor-v1-23-room-id');
@@ -1475,7 +1492,7 @@ document.getElementById('createRoomBtn').onclick=createOnlineRoom;
 document.getElementById('joinRoomBtn').onclick=joinOnlineRoom;
 document.getElementById('leaveRoomBtn').onclick=leaveOnlineRoom;
 document.getElementById('returnToSetupBtn').onclick=leaveOnlineRoom;
-document.getElementById('readyRoomBtn').onclick=()=>{ const ready=!!Net.room?.lobby?.players?.[Net.playerId]?.ready; dispatchAction('LOBBY_SET_READY',{ready:!ready}); };
+document.getElementById('readyRoomBtn').onclick=async()=>{ const ready=!!Net.room?.lobby?.players?.[Net.playerId]?.ready; try{ await patchRestRoom(`lobby/players/${Net.playerId}`,{ready:!ready,lastSeen:Date.now()}); roomStatus(!ready?'Đã sẵn sàng.':'Đã bỏ sẵn sàng.'); }catch(error){ roomStatus(`Không thể đổi trạng thái sẵn sàng: ${error.message}`,true); } };
 
 /* ---------- SETUP UI ---------- */
 let setupState = {count:3, picks:{}};
@@ -1566,6 +1583,7 @@ function startGame(){
   document.getElementById('returnToSetupBtn').classList.remove('hidden');
   document.getElementById('playConnectionStatus').classList.remove('hidden');
   document.getElementById('playSyncStatus').classList.remove('hidden');
+  if(Net.online) patchRestRoom('lobby',{status:'playing'}).catch(error=>roomStatus(`Không thể xác nhận bắt đầu ván: ${error.message}`,true));
   buildFloorTabs();
   setBackdrop();
   log('Cả nhóm bước qua ngưỡng cửa Dinh Thự Blackwood. Cánh cửa sau lưng khẽ đóng.','hl');
