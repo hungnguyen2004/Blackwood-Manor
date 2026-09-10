@@ -1385,14 +1385,14 @@ function publishAuthoritativeState(){
   if(!Net.db||!Net.roomId||!S) return;
   const state=serializeGameState(),fingerprint=JSON.stringify(state); if(fingerprint===Net.lastStateFingerprint) return;
   Net.lastStateFingerprint=fingerprint;
-  roomRef().child('game').transaction(current=>{
-    const active=current?.publicState?.players?.[current?.publicState?.turn];
-    // A player can only commit while their assigned character owns the live turn.
-    if(active?.ownerPlayerId&&active.ownerPlayerId!==Net.playerId) return;
-    return {stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:(current?.stateVersion||0)+1,authoritativeHostId:current?.authoritativeHostId||Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP};
-  }).then(result=>{
-    if(result.committed){ Net.stateVersion=result.snapshot.val().stateVersion; roomStatus(`Firebase ${Net.roomId} · đã ghi state v${Net.stateVersion}`); roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP}); }
-    else { Net.lastStateFingerprint=null; roomStatus('Không thể ghi lượt này vì state đã đổi. Đang đồng bộ lại…',true); }
+  const nextVersion=Math.max(Net.stateVersion||0,Net.room?.game?.stateVersion||0)+1;
+  roomStatus(`Firebase ${Net.roomId} · đang ghi state v${nextVersion}…`);
+  // Each UI action belongs to one turn owner. A direct update avoids a Web SDK
+  // transaction that can remain pending indefinitely in this static prototype.
+  roomRef().child('game').update({stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:nextVersion,authoritativeHostId:Net.room?.game?.authoritativeHostId||Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP}).then(()=>{
+    Net.stateVersion=nextVersion;
+    roomStatus(`Firebase ${Net.roomId} · đã ghi state v${Net.stateVersion}`);
+    roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP});
   }).catch(error=>{ Net.lastStateFingerprint=null; roomStatus(`Không thể ghi state: ${error.message}`,true); });
 }
 function createRoomRecord(name){
