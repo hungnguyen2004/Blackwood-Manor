@@ -31,6 +31,8 @@
   .brand small{color:var(--amber); font-size:11px; letter-spacing:.18em; display:block; margin-top:-2px;}
   .topbar .spacer{flex:1;}
   .pill{font-size:12px; padding:4px 10px; border:1px solid var(--edge); border-radius:20px; color:var(--fog); white-space:nowrap;}
+  .topbar button.back-setup{background:var(--panel2);border:1px solid var(--edge);color:var(--bone);border-radius:8px;padding:5px 9px;font-size:12px;}
+  .topbar button.back-setup:hover{border-color:var(--amber);color:var(--amber);}
   .htrack{display:flex; align-items:center; gap:7px; font-size:11px; color:var(--fog); white-space:nowrap;}
   .htrack .ht-lbl{letter-spacing:.1em; text-transform:uppercase; color:var(--dim);}
   .htrack .ht-pips{display:flex; gap:2px;}
@@ -249,6 +251,7 @@
   <div class="topbar">
     <div class="brand">Dinh Thự Blackwood<small>NHÀ MA & KẺ PHẢN BỘI</small></div>
     <div class="spacer"></div>
+    <button id="returnToSetupBtn" class="back-setup hidden" type="button">← Chọn ván mới</button>
     <div class="pill" id="phasePill">Chuẩn bị</div>
     <div class="htrack" id="htrack"></div>
   </div>
@@ -1300,7 +1303,7 @@ function unsubscribeRoom(){
 }
 function applyAuthoritativeSnapshot(game){
   if(!game?.publicState||game.stateVersion<=Net.stateVersion&&S) return;
-  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.lastStateFingerprint=JSON.stringify(game.publicState); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
+  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.lastStateFingerprint=JSON.stringify(game.publicState); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); document.getElementById('returnToSetupBtn').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
   catch(error){ roomStatus(`Không thể khôi phục state: ${error.message}`,true); }
 }
 function subscribeRoom(){
@@ -1371,7 +1374,15 @@ async function joinOnlineRoom(){
   }catch(error){ roomStatus(`Không thể tham gia phòng: ${error.message}`,true); }
 }
 function leaveOnlineRoom(){
-  if(!Net.online) return; roomRef().child(`lobby/players/${Net.playerId}`).update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP}); unsubscribeRoom(); Net.online=false;Net.isHost=false;Net.room=null;Net.roomId=null;Net.stateVersion=0;Net.lastStateFingerprint=null;localStorage.removeItem('blackwood-manor-v1-23-room-id'); renderRoomLobby();roomStatus('Đã rời phòng. Local mode vẫn hoạt động.');buildSetup();
+  if(Net.online) roomRef().child(`lobby/players/${Net.playerId}`).update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP});
+  unsubscribeRoom(); Net.online=false;Net.isHost=false;Net.room=null;Net.roomId=null;Net.stateVersion=0;Net.lastStateFingerprint=null;
+  localStorage.removeItem('blackwood-manor-v1-23-room-id');
+  S=null;
+  document.getElementById('play').classList.add('hidden');
+  document.getElementById('setup').classList.remove('hidden');
+  document.getElementById('returnToSetupBtn').classList.add('hidden');
+  document.getElementById('phasePill').textContent='Chuẩn bị';
+  renderRoomLobby();roomStatus('Đã rời phòng. Dữ liệu phòng cũ vẫn được giữ nguyên.');buildSetup();
 }
 function restoreOnlineRoom(){
   const id=localStorage.getItem('blackwood-manor-v1-23-room-id'),name=localStorage.getItem('blackwood-manor-v1-23-display-name'),config=window.BLACKWOOD_FIREBASE_CONFIG;
@@ -1381,6 +1392,7 @@ function restoreOnlineRoom(){
 document.getElementById('createRoomBtn').onclick=createOnlineRoom;
 document.getElementById('joinRoomBtn').onclick=joinOnlineRoom;
 document.getElementById('leaveRoomBtn').onclick=leaveOnlineRoom;
+document.getElementById('returnToSetupBtn').onclick=leaveOnlineRoom;
 document.getElementById('readyRoomBtn').onclick=()=>{ const ready=!!Net.room?.lobby?.players?.[Net.playerId]?.ready; dispatchAction('LOBBY_SET_READY',{ready:!ready}); };
 
 /* ---------- SETUP UI ---------- */
@@ -1458,6 +1470,7 @@ function startGame(){
   placeTile(S,'b',0,0,{name:'Chân Thang Hầm', sym:null, landing:true, doors:doorsObj(['n','e','s','w'])});
   document.getElementById('setup').classList.add('hidden');
   document.getElementById('play').classList.remove('hidden');
+  document.getElementById('returnToSetupBtn').classList.remove('hidden');
   buildFloorTabs();
   setBackdrop();
   log('Cả nhóm bước qua ngưỡng cửa Dinh Thự Blackwood. Cánh cửa sau lưng khẽ đóng.','hl');
