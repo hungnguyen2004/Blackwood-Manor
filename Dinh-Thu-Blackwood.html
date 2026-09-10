@@ -254,6 +254,7 @@
     <div class="brand">Dinh Thự Blackwood<small>NHÀ MA & KẺ PHẢN BỘI</small></div>
     <div class="spacer"></div>
     <button id="returnToSetupBtn" class="back-setup hidden" type="button">← Chọn ván mới</button>
+    <div id="playConnectionStatus" class="sync-status hidden" aria-live="polite"></div>
     <div id="playSyncStatus" class="sync-status hidden" aria-live="polite"></div>
     <div class="pill" id="phasePill">Chuẩn bị</div>
     <div class="htrack" id="htrack"></div>
@@ -1208,13 +1209,17 @@ const STATE_SCHEMA_VERSION=1;
 const ROOM_ROOT='blackwoodManor/v1_23/rooms';
 const MAX_ROOM_PLAYERS=6;
 const Net={db:null,roomId:null,playerId:null,isHost:false,online:false,room:null,
-  roomListener:null,actionListener:null,connectionListener:null,statePollTimer:null,statePollBusy:false,writeTimer:null,connection:'offline',
+  roomListener:null,actionListener:null,connectionListener:null,statePollTimer:null,statePollBusy:false,writeTimer:null,reconnectTimer:null,transport:'unknown',connection:'offline',
   stateVersion:0,lastStateFingerprint:null,authoritativeFingerprint:null,processedActions:new Set()};
 
 function roomStatus(message,bad=false){
   const setupStatus=document.getElementById('roomStatus'),playStatus=document.getElementById('playSyncStatus');
   if(setupStatus){ setupStatus.textContent=message; setupStatus.style.color=bad?'#d87575':''; }
   if(playStatus){ playStatus.textContent=message; playStatus.classList.toggle('bad',bad); }
+}
+function connectionStatus(message,bad=false){
+  const el=document.getElementById('playConnectionStatus'); if(!el) return;
+  el.textContent=message; el.classList.toggle('bad',bad);
 }
 function roomCode(){ return Math.random().toString(36).slice(2,8).toUpperCase(); }
 function safeDisplayName(){ return (document.getElementById('onlineDisplayName').value.trim()||'Khách').slice(0,24); }
@@ -1230,7 +1235,9 @@ function firebaseReady(){
     if(!firebase.apps.length) firebase.initializeApp(config);
     // Prefer RTDB long polling: WebSocket can connect initially but then leave
     // writes pending on some desktop browser/proxy combinations.
-    firebase.database.INTERNAL?.forceLongPolling?.();
+    const forceLongPolling=firebase.database.INTERNAL?.forceLongPolling;
+    if(typeof forceLongPolling==='function'){ firebase.database.INTERNAL.forceLongPolling(); Net.transport='long-polling requested'; }
+    else Net.transport='default transport (long-poll API unavailable)';
     Net.db=firebase.database(); Net.db.goOnline(); Net.playerId=persistentPlayerId();
   }
   return true;
@@ -1306,7 +1313,10 @@ function markPresence(){
   ref.update({connected:true,lastSeen:firebase.database.ServerValue.TIMESTAMP});
   ref.onDisconnect().update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP});
 }
-function updateConnection(connected){ Net.connection=connected?'connected':'reconnecting'; if(Net.online) roomStatus(connected?`Đã kết nối phòng ${Net.roomId}.`:'Mất kết nối — đang thử kết nối lại…',!connected); }
+function updateConnection(connected){
+  Net.connection=connected?'connected':'reconnecting';
+  if(Net.roomId) connectionStatus(`RTDB ${Net.transport} · ${connected?'đã kết nối':'đang kết nối lại…'}`,!connected);
+}
 function subscribeConnection(){
   if(Net.connectionListener) Net.db.ref('.info/connected').off('value',Net.connectionListener);
   Net.connectionListener=snapshot=>updateConnection(!!snapshot.val()); Net.db.ref('.info/connected').on('value',Net.connectionListener);
@@ -1325,7 +1335,7 @@ function applyAuthoritativeSnapshot(game){
   // newer public state while a browser has already observed the same version.
   const authoritativeFingerprint=JSON.stringify(game.publicState);
   if(authoritativeFingerprint===Net.authoritativeFingerprint) return;
-  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.authoritativeFingerprint=authoritativeFingerprint; Net.lastStateFingerprint=JSON.stringify(serializeGameState()); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); document.getElementById('returnToSetupBtn').classList.remove('hidden'); document.getElementById('playSyncStatus').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
+  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.authoritativeFingerprint=authoritativeFingerprint; Net.lastStateFingerprint=JSON.stringify(serializeGameState()); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); document.getElementById('returnToSetupBtn').classList.remove('hidden'); document.getElementById('playConnectionStatus').classList.remove('hidden'); document.getElementById('playSyncStatus').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
   catch(error){ roomStatus(`Không thể khôi phục state: ${error.message}`,true); }
 }
 function subscribeRoom(){
@@ -1394,15 +1404,21 @@ function publishAuthoritativeState(){
   const nextVersion=Math.max(Net.stateVersion||0,Net.room?.game?.stateVersion||0)+1;
   roomStatus(`Firebase ${Net.roomId} · đang ghi state v${nextVersion}…`);
   clearTimeout(Net.writeTimer);
-  Net.writeTimer=setTimeout(()=>roomStatus(`Firebase ${Net.roomId} · ghi state đang chờ kết nối RTDB…`,true),5000);
+  Net.writeTimer=setTimeout(()=>{
+    Net.lastStateFingerprint=null;
+    roomStatus(`Firebase ${Net.roomId} · ghi state chưa có ACK, đang ép RTDB kết nối lại…`,true);
+    Net.db.goOffline();
+    clearTimeout(Net.reconnectTimer);
+    Net.reconnectTimer=setTimeout(()=>{ Net.db.goOnline(); connectionStatus(`RTDB ${Net.transport} · đã yêu cầu kết nối lại`,true); },150);
+  },5000);
   // Each UI action belongs to one turn owner. A direct update avoids a Web SDK
   // transaction that can remain pending indefinitely in this static prototype.
   roomRef().child('game').update({stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:nextVersion,authoritativeHostId:Net.room?.game?.authoritativeHostId||Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP}).then(()=>{
-    clearTimeout(Net.writeTimer); Net.writeTimer=null;
+    clearTimeout(Net.writeTimer); clearTimeout(Net.reconnectTimer); Net.writeTimer=null; Net.reconnectTimer=null;
     Net.stateVersion=nextVersion;
     roomStatus(`Firebase ${Net.roomId} · đã ghi state v${Net.stateVersion}`);
     roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP});
-  }).catch(error=>{ clearTimeout(Net.writeTimer); Net.writeTimer=null; Net.lastStateFingerprint=null; roomStatus(`Không thể ghi state: ${error.message}`,true); });
+  }).catch(error=>{ clearTimeout(Net.writeTimer); clearTimeout(Net.reconnectTimer); Net.writeTimer=null; Net.reconnectTimer=null; Net.lastStateFingerprint=null; roomStatus(`Không thể ghi state: ${error.message}`,true); });
 }
 function createRoomRecord(name){
   const player={playerId:Net.playerId,displayName:name,seatId:0,ready:false,joinedAt:firebase.database.ServerValue.TIMESTAMP,lastSeen:firebase.database.ServerValue.TIMESTAMP};
@@ -1437,13 +1453,14 @@ async function joinOnlineRoom(){
 }
 function leaveOnlineRoom(){
   if(Net.online) roomRef().child(`lobby/players/${Net.playerId}`).update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP});
-  clearTimeout(Net.writeTimer); Net.writeTimer=null;
+  clearTimeout(Net.writeTimer); clearTimeout(Net.reconnectTimer); Net.writeTimer=null; Net.reconnectTimer=null;
   unsubscribeRoom(); Net.online=false;Net.isHost=false;Net.room=null;Net.roomId=null;Net.stateVersion=0;Net.lastStateFingerprint=null;Net.authoritativeFingerprint=null;
   localStorage.removeItem('blackwood-manor-v1-23-room-id');
   S=null;
   document.getElementById('play').classList.add('hidden');
   document.getElementById('setup').classList.remove('hidden');
   document.getElementById('returnToSetupBtn').classList.add('hidden');
+  document.getElementById('playConnectionStatus').classList.add('hidden');
   document.getElementById('playSyncStatus').classList.add('hidden');
   document.getElementById('phasePill').textContent='Chuẩn bị';
   renderRoomLobby();roomStatus('Đã rời phòng. Dữ liệu phòng cũ vẫn được giữ nguyên.');buildSetup();
@@ -1546,6 +1563,7 @@ function startGame(){
   document.getElementById('setup').classList.add('hidden');
   document.getElementById('play').classList.remove('hidden');
   document.getElementById('returnToSetupBtn').classList.remove('hidden');
+  document.getElementById('playConnectionStatus').classList.remove('hidden');
   document.getElementById('playSyncStatus').classList.remove('hidden');
   buildFloorTabs();
   setBackdrop();
