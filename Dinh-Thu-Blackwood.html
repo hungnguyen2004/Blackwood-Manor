@@ -1235,10 +1235,11 @@ function firebaseReady(){
     if(!firebase.apps.length) firebase.initializeApp(config);
     // Prefer RTDB long polling: WebSocket can connect initially but then leave
     // writes pending on some desktop browser/proxy combinations.
-    const forceLongPolling=firebase.database.INTERNAL?.forceLongPolling;
-    if(typeof forceLongPolling==='function'){ firebase.database.INTERNAL.forceLongPolling(); Net.transport='long-polling requested'; }
+    Net.db=firebase.database();
+    const forceLongPolling=Net.db.INTERNAL?.forceLongPolling;
+    if(typeof forceLongPolling==='function'){ Net.db.INTERNAL.forceLongPolling(); Net.transport='long-polling requested'; }
     else Net.transport='default transport (long-poll API unavailable)';
-    Net.db=firebase.database(); Net.db.goOnline(); Net.playerId=persistentPlayerId();
+    Net.db.goOnline(); Net.playerId=persistentPlayerId();
   }
   return true;
 }
