@@ -1332,7 +1332,7 @@ function subscribeRoom(){
   // Some file:// browser contexts establish the initial RTDB read but fail to
   // deliver later streaming events. Polling the small game node is a fallback.
   Net.statePollTimer=setInterval(async()=>{
-    if(!Net.online||Net.statePollBusy) return;
+    if(!Net.db||!Net.roomId||Net.statePollBusy) return;
     Net.statePollBusy=true;
     try{ applyAuthoritativeSnapshot((await roomRef().child('game').once('value')).val()); }
     catch(error){ roomStatus(`Không thể làm mới state: ${error.message}`,true); }
@@ -1376,7 +1376,9 @@ function dispatchAction(type,payload={}){
   return roomRef().child('actions').push({type,payload,actorId:Net.playerId,status:'pending',requestedAt:firebase.database.ServerValue.TIMESTAMP}).then(()=>true).catch(error=>{roomStatus(`Không gửi được action: ${error.message}`,true);return false;});
 }
 function publishAuthoritativeState(){
-  if(!Net.online||!S) return;
+  // A browser reconnect can briefly desynchronise the UI flag; the database
+  // handle and room id are the durable proof that this is an online game.
+  if(!Net.db||!Net.roomId||!S) return;
   const state=serializeGameState(),fingerprint=JSON.stringify(state); if(fingerprint===Net.lastStateFingerprint) return;
   Net.lastStateFingerprint=fingerprint;
   roomRef().child('game').transaction(current=>{
