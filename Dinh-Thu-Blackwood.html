@@ -285,7 +285,7 @@
       </div>
       <div class="pickmsg" id="roomRoster"></div>
       <div class="count-row hidden" id="roomActions"><button id="readyRoomBtn" type="button">Sẵn sàng</button></div>
-      <p class="pickmsg">v1.23 đồng bộ lobby và authoritative snapshot. Gameplay online đầy đủ, action gameplay và thông tin bí mật sẽ được bổ sung ở phiên bản sau.</p>
+      <p class="pickmsg">Mỗi nhân vật được gán theo thứ tự vào phòng. Đến lượt ai, người đó gửi action cho host xác thực và đồng bộ lại state.</p>
     </div>
 
     <button class="go" id="startBtn" disabled>Vào ngôi nhà</button>
@@ -1226,7 +1226,13 @@ function firebaseReady(){
   return true;
 }
 function roomRef(id=Net.roomId){ return Net.db.ref(`${ROOM_ROOT}/${id}`); }
-function onlineReadOnly(){ return Net.online&&!Net.isHost; }
+function controlsCurrentTurn(){
+  if(!Net.online||!S) return true;
+  const owner=cur()?.ownerPlayerId;
+  // Rooms created before player ownership was added remain host-controlled.
+  return owner?owner===Net.playerId:Net.isHost;
+}
+function onlineReadOnly(){ return Net.online&&!controlsCurrentTurn(); }
 function jsonData(value){ return value===undefined?null:JSON.parse(JSON.stringify(value)); }
 function serialiseCard(card){ return Object.fromEntries(Object.entries(card||{}).filter(([,value])=>typeof value!=='function')); }
 function serialisePlayer(player){
@@ -1303,7 +1309,7 @@ function unsubscribeRoom(){
 }
 function applyAuthoritativeSnapshot(game){
   if(!game?.publicState||game.stateVersion<=Net.stateVersion&&S) return;
-  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.lastStateFingerprint=JSON.stringify(game.publicState); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); document.getElementById('returnToSetupBtn').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
+  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.lastStateFingerprint=JSON.stringify(serializeGameState()); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); document.getElementById('returnToSetupBtn').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
   catch(error){ roomStatus(`Không thể khôi phục state: ${error.message}`,true); }
 }
 function subscribeRoom(){
@@ -1313,22 +1319,40 @@ function subscribeRoom(){
     if(room.schemaVersion!==ROOM_SCHEMA_VERSION||room.gameVersion!==GAME_VERSION) return roomStatus('Phiên bản phòng không tương thích.',true);
     Net.room=room; Net.isHost=room.meta?.hostPlayerId===Net.playerId; renderRoomLobby();
     if(room.game?.publicState) applyAuthoritativeSnapshot(room.game);
-    else roomStatus(`Phòng ${Net.roomId}: ${Net.isHost?'bạn là host':'đang chờ host bắt đầu'}.`);
+    else { buildSetup(); roomStatus(`Phòng ${Net.roomId}: ${Net.isHost?'bạn là host':'đang chờ host bắt đầu'}.`); }
     if(Net.isHost) subscribeHostActions();
   };
   roomRef().on('value',Net.roomListener,error=>roomStatus(`Không thể đồng bộ phòng: ${error.message}`,true));
   markPresence();
 }
 function validLobbyAction(action,room){ return action&&action.type==='LOBBY_SET_READY'&&action.actorId&&room.lobby?.players?.[action.actorId]; }
+function validGameProposal(action,room){
+  if(!action||action.type!=='GAME_STATE_PROPOSAL'||!action.actorId||!room.game?.publicState) return false;
+  if(action.payload?.baseStateVersion!==room.game.stateVersion) return false;
+  const active=room.game.publicState.players?.[room.game.publicState.turn];
+  const proposed=action.payload?.state;
+  return !!active&&active.ownerPlayerId===action.actorId&&proposed?.schemaVersion===STATE_SCHEMA_VERSION&&Array.isArray(proposed.players);
+}
 function subscribeHostActions(){
   if(Net.actionListener) return;
-  Net.actionListener=snapshot=>{
+  Net.actionListener=async snapshot=>{
     const action=snapshot.val(); if(!action||action.status!=='pending'||Net.processedActions.has(snapshot.key)) return;
     Net.processedActions.add(snapshot.key);
-    if(!validLobbyAction(action,Net.room)){ snapshot.ref.update({status:'rejected',reason:'invalid-action'}); return; }
-    const ready=!!action.payload?.ready;
-    roomRef().child(`lobby/players/${action.actorId}`).update({ready,lastSeen:firebase.database.ServerValue.TIMESTAMP});
-    snapshot.ref.update({status:'applied',processedAt:firebase.database.ServerValue.TIMESTAMP});
+    const room=(await roomRef().once('value')).val();
+    if(validLobbyAction(action,room)){
+      const ready=!!action.payload?.ready;
+      roomRef().child(`lobby/players/${action.actorId}`).update({ready,lastSeen:firebase.database.ServerValue.TIMESTAMP});
+      snapshot.ref.update({status:'applied',processedAt:firebase.database.ServerValue.TIMESTAMP});
+      return;
+    }
+    if(!validGameProposal(action,room)){ snapshot.ref.update({status:'rejected',reason:'invalid-or-stale-action'}); return; }
+    try{
+      S=rehydrateGameState(action.payload.state);
+      Net.stateVersion=room.game.stateVersion||0;
+      Net.lastStateFingerprint=null;
+      render();
+      snapshot.ref.update({status:'applied',processedAt:firebase.database.ServerValue.TIMESTAMP});
+    }catch(error){ snapshot.ref.update({status:'rejected',reason:'invalid-state'}); }
   };
   roomRef().child('actions').on('child_added',Net.actionListener);
 }
@@ -1337,8 +1361,14 @@ function dispatchAction(type,payload={}){
   return roomRef().child('actions').push({type,payload,actorId:Net.playerId,status:'pending',requestedAt:firebase.database.ServerValue.TIMESTAMP}).then(()=>true).catch(error=>{roomStatus(`Không gửi được action: ${error.message}`,true);return false;});
 }
 function publishAuthoritativeState(){
-  if(!Net.online||!Net.isHost||!S) return;
+  if(!Net.online||!S) return;
   const state=serializeGameState(),fingerprint=JSON.stringify(state); if(fingerprint===Net.lastStateFingerprint) return;
+  if(!Net.isHost){
+    if(!controlsCurrentTurn()) return;
+    Net.lastStateFingerprint=fingerprint;
+    dispatchAction('GAME_STATE_PROPOSAL',{baseStateVersion:Net.stateVersion,state}).then(sent=>{ if(sent) roomStatus('Đã gửi lượt chơi cho host…'); });
+    return;
+  }
   Net.lastStateFingerprint=fingerprint;
   roomRef().child('game').transaction(current=>({stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:(current?.stateVersion||0)+1,authoritativeHostId:Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP})).then(result=>{ if(result.committed){ Net.stateVersion=result.snapshot.val().stateVersion; roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP}); } }).catch(error=>roomStatus(`Host không thể ghi state: ${error.message}`,true));
 }
@@ -1397,12 +1427,17 @@ document.getElementById('readyRoomBtn').onclick=()=>{ const ready=!!Net.room?.lo
 
 /* ---------- SETUP UI ---------- */
 let setupState = {count:3, picks:{}};
+function lobbyPlayersBySeat(){ return Object.values(Net.room?.lobby?.players||{}).sort((a,b)=>(a.seatId??99)-(b.seatId??99)); }
 function buildSetup(){
+  const onlineSeats=Net.online&&Net.isHost&&Net.room?.lobby?.status==='lobby'?lobbyPlayersBySeat():null;
+  const fixedCount=onlineSeats?.length>=2?onlineSeats.length:null;
+  if(fixedCount&&setupState.count!==fixedCount){ setupState.count=fixedCount; setupState.picks={}; }
   const cr=document.getElementById('countRow'); cr.innerHTML='';
   for(let n=2;n<=6;n++){
     const b=document.createElement('button'); b.textContent=n;
     if(n===setupState.count) b.classList.add('on');
-    b.onclick=()=>{ if(onlineReadOnly()) return; setupState.count=n; setupState.picks={}; buildSetup(); };
+    b.disabled=!!fixedCount&&n!==fixedCount;
+    b.onclick=()=>{ if(onlineReadOnly()||fixedCount) return; setupState.count=n; setupState.picks={}; buildSetup(); };
     cr.appendChild(b);
   }
   const grid=document.getElementById('charGrid'); grid.innerHTML='';
@@ -1419,8 +1454,9 @@ function buildSetup(){
     grid.appendChild(el);
   });
   const picked=Object.keys(setupState.picks).length;
-  document.getElementById('pickMsg').textContent=`Đã chọn ${picked}/${setupState.count} nhân vật. Bấm lần lượt cho từng người chơi.`;
-  document.getElementById('startBtn').disabled = picked!==setupState.count || onlineReadOnly();
+  const seatNote=fixedCount?` Phòng có ${fixedCount} người; nhân vật được gán theo thứ tự vào phòng.`:'';
+  document.getElementById('pickMsg').textContent=`Đã chọn ${picked}/${setupState.count} nhân vật. Bấm lần lượt cho từng người chơi.${seatNote}`;
+  document.getElementById('startBtn').disabled = picked!==setupState.count || onlineReadOnly() || (Net.online&&(!fixedCount||fixedCount!==setupState.count));
 }
 function togglePick(cid){
   if(onlineReadOnly()) return;
@@ -1444,11 +1480,16 @@ function startGame(){
     roomStatus('Chỉ host có thể bắt đầu ván trong phòng trực tuyến.',true);
     return;
   }
+  const onlineSeats=Net.online?lobbyPlayersBySeat():[];
+  if(Net.online&&(onlineSeats.length<2||onlineSeats.length!==setupState.count)){
+    roomStatus('Cần đúng số nhân vật bằng số người đã vào phòng trước khi bắt đầu.',true);
+    return;
+  }
   const players=[];
   for(let i=0;i<setupState.count;i++){
     const base=CHARACTERS.find(c=>c.id===setupState.picks[i]);
     players.push({
-      idx:i, name:base.name, base,
+      idx:i, name:base.name, base, ownerPlayerId:onlineSeats[i]?.playerId||null,
       str:base.str, agi:base.agi, spi:base.spi, int:base.int,
       statMax:{...base.max},
       hp:base.hp, hpMax:base.hp, san:base.san, sanMax:base.san,
@@ -2212,6 +2253,7 @@ function renderSide(){
   if(S.phase==='explore'){ roleEl.textContent='Khám phá · lượt '+((S.turn)+1); roleEl.className='role explore'; }
   else if(p.traitor){ roleEl.textContent='KẺ PHẢN BỘI'; roleEl.className='role trait'; }
   else { roleEl.textContent='ANH HÙNG'; roleEl.className='role hero'; }
+  if(Net.online) roleEl.textContent+=controlsCurrentTurn()?' · Lượt của bạn':' · Đang chờ người chơi này';
   // bars
   document.getElementById('hpNum').textContent=`${p.hp}/${p.hpMax}`;
   document.getElementById('sanNum').textContent=`${p.san}/${p.sanMax}`;
