@@ -1208,7 +1208,7 @@ const STATE_SCHEMA_VERSION=1;
 const ROOM_ROOT='blackwoodManor/v1_23/rooms';
 const MAX_ROOM_PLAYERS=6;
 const Net={db:null,roomId:null,playerId:null,isHost:false,online:false,room:null,
-  roomListener:null,actionListener:null,connectionListener:null,statePollTimer:null,statePollBusy:false,connection:'offline',
+  roomListener:null,actionListener:null,connectionListener:null,statePollTimer:null,statePollBusy:false,writeTimer:null,connection:'offline',
   stateVersion:0,lastStateFingerprint:null,authoritativeFingerprint:null,processedActions:new Set()};
 
 function roomStatus(message,bad=false){
@@ -1226,7 +1226,13 @@ function persistentPlayerId(){
 function firebaseReady(){
   const config=window.BLACKWOOD_FIREBASE_CONFIG;
   if(!config||!config.apiKey||!config.databaseURL||!window.firebase){ roomStatus('Firebase chưa được cấu hình; local mode vẫn hoạt động.',true); return false; }
-  if(!Net.db){ if(!firebase.apps.length) firebase.initializeApp(config); Net.db=firebase.database(); Net.playerId=persistentPlayerId(); }
+  if(!Net.db){
+    if(!firebase.apps.length) firebase.initializeApp(config);
+    // Prefer RTDB long polling: WebSocket can connect initially but then leave
+    // writes pending on some desktop browser/proxy combinations.
+    firebase.database.INTERNAL?.forceLongPolling?.();
+    Net.db=firebase.database(); Net.db.goOnline(); Net.playerId=persistentPlayerId();
+  }
   return true;
 }
 function roomRef(id=Net.roomId){ return Net.db.ref(`${ROOM_ROOT}/${id}`); }
@@ -1387,13 +1393,16 @@ function publishAuthoritativeState(){
   Net.lastStateFingerprint=fingerprint;
   const nextVersion=Math.max(Net.stateVersion||0,Net.room?.game?.stateVersion||0)+1;
   roomStatus(`Firebase ${Net.roomId} · đang ghi state v${nextVersion}…`);
+  clearTimeout(Net.writeTimer);
+  Net.writeTimer=setTimeout(()=>roomStatus(`Firebase ${Net.roomId} · ghi state đang chờ kết nối RTDB…`,true),5000);
   // Each UI action belongs to one turn owner. A direct update avoids a Web SDK
   // transaction that can remain pending indefinitely in this static prototype.
   roomRef().child('game').update({stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:nextVersion,authoritativeHostId:Net.room?.game?.authoritativeHostId||Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP}).then(()=>{
+    clearTimeout(Net.writeTimer); Net.writeTimer=null;
     Net.stateVersion=nextVersion;
     roomStatus(`Firebase ${Net.roomId} · đã ghi state v${Net.stateVersion}`);
     roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP});
-  }).catch(error=>{ Net.lastStateFingerprint=null; roomStatus(`Không thể ghi state: ${error.message}`,true); });
+  }).catch(error=>{ clearTimeout(Net.writeTimer); Net.writeTimer=null; Net.lastStateFingerprint=null; roomStatus(`Không thể ghi state: ${error.message}`,true); });
 }
 function createRoomRecord(name){
   const player={playerId:Net.playerId,displayName:name,seatId:0,ready:false,joinedAt:firebase.database.ServerValue.TIMESTAMP,lastSeen:firebase.database.ServerValue.TIMESTAMP};
@@ -1428,6 +1437,7 @@ async function joinOnlineRoom(){
 }
 function leaveOnlineRoom(){
   if(Net.online) roomRef().child(`lobby/players/${Net.playerId}`).update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP});
+  clearTimeout(Net.writeTimer); Net.writeTimer=null;
   unsubscribeRoom(); Net.online=false;Net.isHost=false;Net.room=null;Net.roomId=null;Net.stateVersion=0;Net.lastStateFingerprint=null;Net.authoritativeFingerprint=null;
   localStorage.removeItem('blackwood-manor-v1-23-room-id');
   S=null;
