@@ -285,7 +285,7 @@
       </div>
       <div class="pickmsg" id="roomRoster"></div>
       <div class="count-row hidden" id="roomActions"><button id="readyRoomBtn" type="button">Sẵn sàng</button></div>
-      <p class="pickmsg">Mỗi nhân vật được gán theo thứ tự vào phòng. Đến lượt ai, người đó gửi action cho host xác thực và đồng bộ lại state.</p>
+      <p class="pickmsg">Mỗi nhân vật được gán theo thứ tự vào phòng. Đến lượt ai, người đó mới có thể ghi state lượt của mình và đồng bộ cho cả phòng.</p>
     </div>
 
     <button class="go" id="startBtn" disabled>Vào ngôi nhà</button>
@@ -1367,14 +1367,17 @@ function dispatchAction(type,payload={}){
 function publishAuthoritativeState(){
   if(!Net.online||!S) return;
   const state=serializeGameState(),fingerprint=JSON.stringify(state); if(fingerprint===Net.lastStateFingerprint) return;
-  if(!Net.isHost){
-    if(!controlsCurrentTurn()) return;
-    Net.lastStateFingerprint=fingerprint;
-    dispatchAction('GAME_STATE_PROPOSAL',{baseStateVersion:Net.stateVersion,state}).then(sent=>{ if(sent) roomStatus('Đã gửi lượt chơi cho host…'); });
-    return;
-  }
+  if(!controlsCurrentTurn()) return;
   Net.lastStateFingerprint=fingerprint;
-  roomRef().child('game').transaction(current=>({stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:(current?.stateVersion||0)+1,authoritativeHostId:Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP})).then(result=>{ if(result.committed){ Net.stateVersion=result.snapshot.val().stateVersion; roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP}); } }).catch(error=>roomStatus(`Host không thể ghi state: ${error.message}`,true));
+  roomRef().child('game').transaction(current=>{
+    const active=current?.publicState?.players?.[current?.publicState?.turn];
+    // A player can only commit while their assigned character owns the live turn.
+    if(active?.ownerPlayerId&&active.ownerPlayerId!==Net.playerId) return;
+    return {stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:(current?.stateVersion||0)+1,authoritativeHostId:current?.authoritativeHostId||Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP};
+  }).then(result=>{
+    if(result.committed){ Net.stateVersion=result.snapshot.val().stateVersion; roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP}); }
+    else { Net.lastStateFingerprint=null; roomStatus('Không thể ghi lượt này vì state đã đổi. Đang đồng bộ lại…',true); }
+  }).catch(error=>{ Net.lastStateFingerprint=null; roomStatus(`Không thể ghi state: ${error.message}`,true); });
 }
 function createRoomRecord(name){
   const player={playerId:Net.playerId,displayName:name,seatId:0,ready:false,joinedAt:firebase.database.ServerValue.TIMESTAMP,lastSeen:firebase.database.ServerValue.TIMESTAMP};
