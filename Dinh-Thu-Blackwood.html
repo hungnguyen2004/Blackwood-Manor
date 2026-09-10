@@ -31,6 +31,8 @@
   .brand small{color:var(--amber); font-size:11px; letter-spacing:.18em; display:block; margin-top:-2px;}
   .topbar .spacer{flex:1;}
   .pill{font-size:12px; padding:4px 10px; border:1px solid var(--edge); border-radius:20px; color:var(--fog); white-space:nowrap;}
+  .sync-status{font-size:11px;color:var(--fog);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .sync-status.bad{color:#d87575;}
   .topbar button.back-setup{background:var(--panel2);border:1px solid var(--edge);color:var(--bone);border-radius:8px;padding:5px 9px;font-size:12px;}
   .topbar button.back-setup:hover{border-color:var(--amber);color:var(--amber);}
   .htrack{display:flex; align-items:center; gap:7px; font-size:11px; color:var(--fog); white-space:nowrap;}
@@ -252,6 +254,7 @@
     <div class="brand">Dinh Thự Blackwood<small>NHÀ MA & KẺ PHẢN BỘI</small></div>
     <div class="spacer"></div>
     <button id="returnToSetupBtn" class="back-setup hidden" type="button">← Chọn ván mới</button>
+    <div id="playSyncStatus" class="sync-status hidden" aria-live="polite"></div>
     <div class="pill" id="phasePill">Chuẩn bị</div>
     <div class="htrack" id="htrack"></div>
   </div>
@@ -1209,8 +1212,9 @@ const Net={db:null,roomId:null,playerId:null,isHost:false,online:false,room:null
   stateVersion:0,lastStateFingerprint:null,authoritativeFingerprint:null,processedActions:new Set()};
 
 function roomStatus(message,bad=false){
-  const el=document.getElementById('roomStatus'); if(!el) return;
-  el.textContent=message; el.style.color=bad?'#d87575':'';
+  const setupStatus=document.getElementById('roomStatus'),playStatus=document.getElementById('playSyncStatus');
+  if(setupStatus){ setupStatus.textContent=message; setupStatus.style.color=bad?'#d87575':''; }
+  if(playStatus){ playStatus.textContent=message; playStatus.classList.toggle('bad',bad); }
 }
 function roomCode(){ return Math.random().toString(36).slice(2,8).toUpperCase(); }
 function safeDisplayName(){ return (document.getElementById('onlineDisplayName').value.trim()||'Khách').slice(0,24); }
@@ -1315,7 +1319,7 @@ function applyAuthoritativeSnapshot(game){
   // newer public state while a browser has already observed the same version.
   const authoritativeFingerprint=JSON.stringify(game.publicState);
   if(authoritativeFingerprint===Net.authoritativeFingerprint) return;
-  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.authoritativeFingerprint=authoritativeFingerprint; Net.lastStateFingerprint=JSON.stringify(serializeGameState()); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); document.getElementById('returnToSetupBtn').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
+  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.authoritativeFingerprint=authoritativeFingerprint; Net.lastStateFingerprint=JSON.stringify(serializeGameState()); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); document.getElementById('returnToSetupBtn').classList.remove('hidden'); document.getElementById('playSyncStatus').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
   catch(error){ roomStatus(`Không thể khôi phục state: ${error.message}`,true); }
 }
 function subscribeRoom(){
@@ -1324,7 +1328,7 @@ function subscribeRoom(){
     const room=snapshot.val(); if(!room) return roomStatus('Phòng không còn tồn tại.',true);
     if(room.schemaVersion!==ROOM_SCHEMA_VERSION||room.gameVersion!==GAME_VERSION) return roomStatus('Phiên bản phòng không tương thích.',true);
     Net.room=room; Net.isHost=room.meta?.hostPlayerId===Net.playerId; renderRoomLobby();
-    if(room.game?.publicState) applyAuthoritativeSnapshot(room.game);
+    if(room.game?.publicState){ applyAuthoritativeSnapshot(room.game); roomStatus(`Firebase ${Net.roomId} · state v${room.game.stateVersion||0}`); }
     else { buildSetup(); roomStatus(`Phòng ${Net.roomId}: ${Net.isHost?'bạn là host':'đang chờ host bắt đầu'}.`); }
     if(Net.isHost) subscribeHostActions();
   };
@@ -1387,7 +1391,7 @@ function publishAuthoritativeState(){
     if(active?.ownerPlayerId&&active.ownerPlayerId!==Net.playerId) return;
     return {stateSchemaVersion:STATE_SCHEMA_VERSION,stateVersion:(current?.stateVersion||0)+1,authoritativeHostId:current?.authoritativeHostId||Net.playerId,publicState:state,updatedAt:firebase.database.ServerValue.TIMESTAMP};
   }).then(result=>{
-    if(result.committed){ Net.stateVersion=result.snapshot.val().stateVersion; roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP}); }
+    if(result.committed){ Net.stateVersion=result.snapshot.val().stateVersion; roomStatus(`Firebase ${Net.roomId} · đã ghi state v${Net.stateVersion}`); roomRef().update({"lobby/status":'playing',"meta/hostHeartbeat":firebase.database.ServerValue.TIMESTAMP}); }
     else { Net.lastStateFingerprint=null; roomStatus('Không thể ghi lượt này vì state đã đổi. Đang đồng bộ lại…',true); }
   }).catch(error=>{ Net.lastStateFingerprint=null; roomStatus(`Không thể ghi state: ${error.message}`,true); });
 }
@@ -1430,6 +1434,7 @@ function leaveOnlineRoom(){
   document.getElementById('play').classList.add('hidden');
   document.getElementById('setup').classList.remove('hidden');
   document.getElementById('returnToSetupBtn').classList.add('hidden');
+  document.getElementById('playSyncStatus').classList.add('hidden');
   document.getElementById('phasePill').textContent='Chuẩn bị';
   renderRoomLobby();roomStatus('Đã rời phòng. Dữ liệu phòng cũ vẫn được giữ nguyên.');buildSetup();
 }
@@ -1531,6 +1536,7 @@ function startGame(){
   document.getElementById('setup').classList.add('hidden');
   document.getElementById('play').classList.remove('hidden');
   document.getElementById('returnToSetupBtn').classList.remove('hidden');
+  document.getElementById('playSyncStatus').classList.remove('hidden');
   buildFloorTabs();
   setBackdrop();
   log('Cả nhóm bước qua ngưỡng cửa Dinh Thự Blackwood. Cánh cửa sau lưng khẽ đóng.','hl');
