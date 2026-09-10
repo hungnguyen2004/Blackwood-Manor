@@ -1378,7 +1378,6 @@ function dispatchAction(type,payload={}){
 function publishAuthoritativeState(){
   if(!Net.online||!S) return;
   const state=serializeGameState(),fingerprint=JSON.stringify(state); if(fingerprint===Net.lastStateFingerprint) return;
-  if(!controlsCurrentTurn()) return;
   Net.lastStateFingerprint=fingerprint;
   roomRef().child('game').transaction(current=>{
     const active=current?.publicState?.players?.[current?.publicState?.turn];
