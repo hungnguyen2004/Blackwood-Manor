@@ -1198,14 +1198,14 @@ function charPortrait(id){
 
 /* ---------- FIREBASE REALTIME DATABASE FOUNDATION ----------
    The room schema is versioned and isolated from every older game record.
-   Only the host writes game snapshots; clients send actions for host review. */
+   Turn owners commit their own state snapshots; room data stays versioned. */
 const GAME_VERSION='1.23';
 const ROOM_SCHEMA_VERSION=1;
 const STATE_SCHEMA_VERSION=1;
 const ROOM_ROOT='blackwoodManor/v1_23/rooms';
 const MAX_ROOM_PLAYERS=6;
 const Net={db:null,roomId:null,playerId:null,isHost:false,online:false,room:null,
-  roomListener:null,actionListener:null,connectionListener:null,connection:'offline',
+  roomListener:null,actionListener:null,connectionListener:null,statePollTimer:null,statePollBusy:false,connection:'offline',
   stateVersion:0,lastStateFingerprint:null,authoritativeFingerprint:null,processedActions:new Set()};
 
 function roomStatus(message,bad=false){
@@ -1305,6 +1305,8 @@ function unsubscribeRoom(){
   if(!Net.db) return;
   if(Net.roomListener) roomRef().off('value',Net.roomListener);
   if(Net.actionListener) roomRef().child('actions').off('child_added',Net.actionListener);
+  if(Net.statePollTimer) clearInterval(Net.statePollTimer);
+  Net.statePollTimer=null; Net.statePollBusy=false;
   Net.roomListener=null; Net.actionListener=null;
 }
 function applyAuthoritativeSnapshot(game){
@@ -1327,6 +1329,15 @@ function subscribeRoom(){
     if(Net.isHost) subscribeHostActions();
   };
   roomRef().on('value',Net.roomListener,error=>roomStatus(`Không thể đồng bộ phòng: ${error.message}`,true));
+  // Some file:// browser contexts establish the initial RTDB read but fail to
+  // deliver later streaming events. Polling the small game node is a fallback.
+  Net.statePollTimer=setInterval(async()=>{
+    if(!Net.online||Net.statePollBusy) return;
+    Net.statePollBusy=true;
+    try{ applyAuthoritativeSnapshot((await roomRef().child('game').once('value')).val()); }
+    catch(error){ roomStatus(`Không thể làm mới state: ${error.message}`,true); }
+    finally{ Net.statePollBusy=false; }
+  },1000);
   markPresence();
 }
 function validLobbyAction(action,room){ return action&&action.type==='LOBBY_SET_READY'&&action.actorId&&room.lobby?.players?.[action.actorId]; }
