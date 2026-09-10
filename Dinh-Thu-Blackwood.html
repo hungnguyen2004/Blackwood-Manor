@@ -1206,7 +1206,7 @@ const ROOM_ROOT='blackwoodManor/v1_23/rooms';
 const MAX_ROOM_PLAYERS=6;
 const Net={db:null,roomId:null,playerId:null,isHost:false,online:false,room:null,
   roomListener:null,actionListener:null,connectionListener:null,connection:'offline',
-  stateVersion:0,lastStateFingerprint:null,processedActions:new Set()};
+  stateVersion:0,lastStateFingerprint:null,authoritativeFingerprint:null,processedActions:new Set()};
 
 function roomStatus(message,bad=false){
   const el=document.getElementById('roomStatus'); if(!el) return;
@@ -1308,8 +1308,12 @@ function unsubscribeRoom(){
   Net.roomListener=null; Net.actionListener=null;
 }
 function applyAuthoritativeSnapshot(game){
-  if(!game?.publicState||game.stateVersion<=Net.stateVersion&&S) return;
-  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.lastStateFingerprint=JSON.stringify(serializeGameState()); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); document.getElementById('returnToSetupBtn').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
+  if(!game?.publicState) return;
+  // Do not rely only on the counter here: a delayed RTDB event can carry a
+  // newer public state while a browser has already observed the same version.
+  const authoritativeFingerprint=JSON.stringify(game.publicState);
+  if(authoritativeFingerprint===Net.authoritativeFingerprint) return;
+  try{ S=rehydrateGameState(game.publicState); Net.stateVersion=game.stateVersion||0; Net.authoritativeFingerprint=authoritativeFingerprint; Net.lastStateFingerprint=JSON.stringify(serializeGameState()); document.getElementById('setup').classList.add('hidden'); document.getElementById('play').classList.remove('hidden'); document.getElementById('returnToSetupBtn').classList.remove('hidden'); buildFloorTabs(); setBackdrop(); render(); }
   catch(error){ roomStatus(`Không thể khôi phục state: ${error.message}`,true); }
 }
 function subscribeRoom(){
@@ -1405,7 +1409,7 @@ async function joinOnlineRoom(){
 }
 function leaveOnlineRoom(){
   if(Net.online) roomRef().child(`lobby/players/${Net.playerId}`).update({connected:false,lastSeen:firebase.database.ServerValue.TIMESTAMP});
-  unsubscribeRoom(); Net.online=false;Net.isHost=false;Net.room=null;Net.roomId=null;Net.stateVersion=0;Net.lastStateFingerprint=null;
+  unsubscribeRoom(); Net.online=false;Net.isHost=false;Net.room=null;Net.roomId=null;Net.stateVersion=0;Net.lastStateFingerprint=null;Net.authoritativeFingerprint=null;
   localStorage.removeItem('blackwood-manor-v1-23-room-id');
   S=null;
   document.getElementById('play').classList.add('hidden');
